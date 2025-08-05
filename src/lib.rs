@@ -43,7 +43,7 @@ impl Cifs {
         let auth = maybe_auth.unwrap_or(Auth {
             user: String::new(),
             password: String::new(),
-            domain: "WORKGROUP".to_owned(),
+            domain: host.to_string(),
             workstation: "ANONYMOUS".to_owned(),
         });
 

@@ -18,7 +18,7 @@ use crate::netbios::NetBios;
 use crate::smb::info::{Cmd, Flags2, Info, Status};
 use crate::smb::{msg, reply, trans, trans2, Capabilities, DirInfo, SMB_READ_MAX};
 use crate::utils::sanitize_path;
-use crate::win::{FileAttr, NTStatus, NotifyAction};
+use crate::win::{ExtFileAttr, FileAttr, NTStatus, NotifyAction};
 
 const DEFAULT_READ_AHEAD_CAPACITY: usize = 8 * 1024 * 1024;
 const DEFAULT_STREAM_CHUNK_SIZE: u16 = SMB_READ_MAX;
@@ -56,6 +56,34 @@ pub struct ReadAhead {
     buffered: usize,
     options: StreamOptions,
     eof: bool,
+}
+
+#[derive(Debug)]
+pub struct DirectoryReader {
+    tid: u16,
+    sid: u16,
+    pending: Option<Vec<DirInfo>>,
+    last_file: Option<String>,
+    end: bool,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DirectorySortKey {
+    file: bool,
+    name: NaturalNameKey,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct NaturalNameKey(Vec<NaturalToken>);
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum NaturalToken {
+    Number {
+        significant_len: usize,
+        significant: String,
+        raw_len: usize,
+    },
+    Text(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -432,6 +460,56 @@ impl ReadAhead {
     }
 }
 
+impl DirectoryReader {
+    fn new(tid: u16, reply: trans2::subreply::FindFirst2) -> Self {
+        let last_file = last_filename(&reply.info);
+
+        Self {
+            tid,
+            sid: reply.sid,
+            pending: Some(reply.info),
+            last_file,
+            end: reply.end,
+        }
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.end && self.pending.is_none()
+    }
+
+    pub async fn next(&mut self, cifs: &mut Cifs) -> Result<Option<Vec<DirInfo>>, Error> {
+        if let Some(info) = self.pending.take() {
+            return Ok(Some(info));
+        }
+        if self.end {
+            return Ok(None);
+        }
+
+        let last_file = self
+            .last_file
+            .as_deref()
+            .ok_or_else(|| Error::InternalError("directory reader lost resume point".to_owned()))?;
+        let subcmd = trans2::subcmd::FindNext2::new(self.sid, last_file);
+        let reply: trans2::subreply::FindNext2 = cifs.transact2(self.tid, subcmd).await?;
+
+        self.end = reply.end;
+        self.last_file = last_filename(&reply.info);
+        Ok(Some(reply.info))
+    }
+
+    pub async fn next_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        timeout: Duration,
+    ) -> Result<Option<Vec<DirInfo>>, Error> {
+        with_timeout(timeout, self.next(cifs)).await
+    }
+}
+
+pub fn sort_dir_entries(entries: &mut [DirInfo]) {
+    entries.sort_by_cached_key(directory_sort_key);
+}
+
 impl Cifs {
     pub async fn open(
         host: &str,
@@ -668,6 +746,24 @@ impl Cifs {
         let search_flags = FileAttr::HIDDEN | FileAttr::SYSTEM | FileAttr::DIRECTORY;
         let subcmd = trans2::subcmd::FindFirst2::new(sanitize_path(pattern), search_flags);
         self.transact2(share.tid, subcmd).await
+    }
+
+    pub async fn open_dir_reader(
+        &mut self,
+        share: &Share,
+        pattern: &str,
+    ) -> Result<DirectoryReader, Error> {
+        let reply = self.find_first(share, pattern).await?;
+        Ok(DirectoryReader::new(share.tid, reply))
+    }
+
+    pub async fn open_dir_reader_timeout(
+        &mut self,
+        share: &Share,
+        pattern: &str,
+        timeout: Duration,
+    ) -> Result<DirectoryReader, Error> {
+        with_timeout(timeout, self.open_dir_reader(share, pattern)).await
     }
 
     /// find_next continues a search in the given share: sid must be the search
@@ -911,6 +1007,58 @@ fn read_count_for(remaining: u64) -> u16 {
     remaining.min(u64::from(SMB_READ_MAX)) as u16
 }
 
+fn last_filename(info: &[DirInfo]) -> Option<String> {
+    info.last().map(|entry| entry.filename.clone())
+}
+
+fn directory_sort_key(entry: &DirInfo) -> DirectorySortKey {
+    DirectorySortKey {
+        file: !entry.attributes.contains(ExtFileAttr::DIRECTORY),
+        name: natural_name_key(&entry.filename),
+    }
+}
+
+fn natural_name_key(name: &str) -> NaturalNameKey {
+    let mut tokens = Vec::new();
+    let mut chars = name.chars().peekable();
+
+    while let Some(next) = chars.peek().copied() {
+        if next.is_ascii_digit() {
+            let mut raw = String::new();
+            while let Some(c) = chars.peek().copied() {
+                if !c.is_ascii_digit() {
+                    break;
+                }
+                raw.push(c);
+                chars.next();
+            }
+
+            let significant = raw.trim_start_matches('0');
+            tokens.push(NaturalToken::Number {
+                significant_len: significant.len().max(1),
+                significant: if significant.is_empty() {
+                    "0".to_owned()
+                } else {
+                    significant.to_owned()
+                },
+                raw_len: raw.len(),
+            });
+        } else {
+            let mut text = String::new();
+            while let Some(c) = chars.peek().copied() {
+                if c.is_ascii_digit() {
+                    break;
+                }
+                text.push(c);
+                chars.next();
+            }
+            tokens.push(NaturalToken::Text(text.to_lowercase()));
+        }
+    }
+
+    NaturalNameKey(tokens)
+}
+
 fn seek_position(size: u64, current: u64, pos: SeekFrom) -> Result<u64, Error> {
     let next = match pos {
         SeekFrom::Start(offset) => i128::from(offset),
@@ -985,9 +1133,11 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_count_for, resolve_smb_uri, seek_position, ReadAhead, StreamOptions, SMB_READ_MAX,
+        read_count_for, resolve_smb_uri, seek_position, sort_dir_entries, ReadAhead, StreamOptions,
+        SMB_READ_MAX,
     };
     use bytes::Bytes;
+    use chrono::Local;
     use std::io::SeekFrom;
 
     #[test]
@@ -1185,6 +1335,30 @@ mod tests {
     }
 
     #[test]
+    fn sort_dir_entries_uses_media_friendly_order() {
+        let mut entries = vec![
+            fake_dir_entry("Episode 10.mkv", false),
+            fake_dir_entry("season 2", true),
+            fake_dir_entry("Episode 2.mkv", false),
+            fake_dir_entry("Season 1", true),
+            fake_dir_entry("episode 01.mkv", false),
+        ];
+
+        sort_dir_entries(&mut entries);
+
+        assert_eq!(
+            filenames(&entries),
+            vec![
+                "Season 1",
+                "season 2",
+                "episode 01.mkv",
+                "Episode 2.mkv",
+                "Episode 10.mkv",
+            ]
+        );
+    }
+
+    #[test]
     fn test_uri() {
         let uri = "smb://localhost/myshare/this/is/a/path";
         let config = resolve_smb_uri(uri).unwrap();
@@ -1274,5 +1448,29 @@ mod tests {
             file_type: crate::win::ResourceType::DISK,
             directory: false,
         })
+    }
+
+    fn fake_dir_entry(filename: &str, directory: bool) -> super::DirInfo {
+        let now = Local::now();
+        super::DirInfo {
+            creation_time: now,
+            access_time: now,
+            write_time: now,
+            change_time: now,
+            filename: filename.to_owned(),
+            filesize: 0,
+            attributes: if directory {
+                crate::win::ExtFileAttr::DIRECTORY
+            } else {
+                crate::win::ExtFileAttr::empty()
+            },
+        }
+    }
+
+    fn filenames(entries: &[super::DirInfo]) -> Vec<&str> {
+        entries
+            .iter()
+            .map(|entry| entry.filename.as_str())
+            .collect()
     }
 }

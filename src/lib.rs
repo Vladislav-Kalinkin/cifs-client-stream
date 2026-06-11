@@ -22,6 +22,13 @@ use crate::win::{ExtFileAttr, FileAttr, NTStatus, NotifyAction};
 
 const DEFAULT_READ_AHEAD_CAPACITY: usize = 8 * 1024 * 1024;
 const DEFAULT_STREAM_CHUNK_SIZE: u16 = SMB_READ_MAX;
+const AUDIO_EXTENSIONS: &[&str] = &["aac", "aiff", "alac", "flac", "m4a", "mp3", "ogg", "wav"];
+const SUBTITLE_EXTENSIONS: &[&str] = &[
+    "ass", "idx", "smi", "srt", "ssa", "sub", "sup", "ttml", "vtt",
+];
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "avi", "divx", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mts", "ts", "webm", "wmv",
+];
 
 pub use crate::smb::reply::{Handle, Share};
 pub use error::{Error, ErrorKind};
@@ -508,6 +515,25 @@ impl DirectoryReader {
 
 pub fn sort_dir_entries(entries: &mut [DirInfo]) {
     entries.sort_by_cached_key(directory_sort_key);
+}
+
+pub fn is_media_entry(entry: &DirInfo) -> bool {
+    if is_hidden_entry(entry) {
+        return false;
+    }
+    if entry.attributes.contains(ExtFileAttr::DIRECTORY) {
+        return true;
+    }
+
+    let Some(extension) = file_extension(&entry.filename) else {
+        return false;
+    };
+
+    is_media_extension(extension) && !is_subtitle_extension(extension)
+}
+
+pub fn retain_media_entries(entries: &mut Vec<DirInfo>) {
+    entries.retain(is_media_entry);
 }
 
 impl Cifs {
@@ -1018,6 +1044,33 @@ fn directory_sort_key(entry: &DirInfo) -> DirectorySortKey {
     }
 }
 
+fn is_hidden_entry(entry: &DirInfo) -> bool {
+    entry.filename.starts_with('.')
+        || entry
+            .attributes
+            .intersects(ExtFileAttr::HIDDEN | ExtFileAttr::SYSTEM)
+}
+
+fn file_extension(filename: &str) -> Option<&str> {
+    filename.rsplit_once('.').and_then(|(_, extension)| {
+        if extension.is_empty() {
+            None
+        } else {
+            Some(extension)
+        }
+    })
+}
+
+fn is_media_extension(extension: &str) -> bool {
+    let extension = extension.to_ascii_lowercase();
+    AUDIO_EXTENSIONS.contains(&extension.as_str()) || VIDEO_EXTENSIONS.contains(&extension.as_str())
+}
+
+fn is_subtitle_extension(extension: &str) -> bool {
+    let extension = extension.to_ascii_lowercase();
+    SUBTITLE_EXTENSIONS.contains(&extension.as_str())
+}
+
 fn natural_name_key(name: &str) -> NaturalNameKey {
     let mut tokens = Vec::new();
     let mut chars = name.chars().peekable();
@@ -1133,8 +1186,8 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_count_for, resolve_smb_uri, seek_position, sort_dir_entries, ReadAhead, StreamOptions,
-        SMB_READ_MAX,
+        is_media_entry, read_count_for, resolve_smb_uri, retain_media_entries, seek_position,
+        sort_dir_entries, ReadAhead, StreamOptions, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -1359,6 +1412,36 @@ mod tests {
     }
 
     #[test]
+    fn media_filter_keeps_folders_audio_and_video_only() {
+        let mut entries = vec![
+            fake_dir_entry("Movies", true),
+            fake_dir_entry(".Trash", true),
+            fake_dir_entry("Episode 01.mkv", false),
+            fake_dir_entry("Theme.FLAC", false),
+            fake_dir_entry("Episode 01.srt", false),
+            fake_dir_entry("cover.jpg", false),
+            fake_dir_entry(".DS_Store", false),
+            fake_dir_entry("notes.txt", false),
+        ];
+
+        retain_media_entries(&mut entries);
+
+        assert_eq!(
+            filenames(&entries),
+            vec!["Movies", "Episode 01.mkv", "Theme.FLAC"]
+        );
+    }
+
+    #[test]
+    fn media_filter_rejects_hidden_system_entries() {
+        let hidden = fake_dir_entry_with_attrs("movie.mkv", crate::win::ExtFileAttr::HIDDEN);
+        let system = fake_dir_entry_with_attrs("song.mp3", crate::win::ExtFileAttr::SYSTEM);
+
+        assert!(!is_media_entry(&hidden));
+        assert!(!is_media_entry(&system));
+    }
+
+    #[test]
     fn test_uri() {
         let uri = "smb://localhost/myshare/this/is/a/path";
         let config = resolve_smb_uri(uri).unwrap();
@@ -1451,6 +1534,19 @@ mod tests {
     }
 
     fn fake_dir_entry(filename: &str, directory: bool) -> super::DirInfo {
+        let attributes = if directory {
+            crate::win::ExtFileAttr::DIRECTORY
+        } else {
+            crate::win::ExtFileAttr::empty()
+        };
+
+        fake_dir_entry_with_attrs(filename, attributes)
+    }
+
+    fn fake_dir_entry_with_attrs(
+        filename: &str,
+        attributes: crate::win::ExtFileAttr,
+    ) -> super::DirInfo {
         let now = Local::now();
         super::DirInfo {
             creation_time: now,
@@ -1459,11 +1555,7 @@ mod tests {
             change_time: now,
             filename: filename.to_owned(),
             filesize: 0,
-            attributes: if directory {
-                crate::win::ExtFileAttr::DIRECTORY
-            } else {
-                crate::win::ExtFileAttr::empty()
-            },
+            attributes,
         }
     }
 

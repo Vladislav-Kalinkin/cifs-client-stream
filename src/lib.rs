@@ -22,7 +22,9 @@ use crate::win::{ExtFileAttr, FileAttr, NTStatus, NotifyAction};
 
 const DEFAULT_READ_AHEAD_CAPACITY: usize = 8 * 1024 * 1024;
 const DEFAULT_STREAM_CHUNK_SIZE: u16 = SMB_READ_MAX;
-const AUDIO_EXTENSIONS: &[&str] = &["aac", "aiff", "alac", "flac", "m4a", "mp3", "ogg", "wav"];
+const AUDIO_EXTENSIONS: &[&str] = &[
+    "aac", "aiff", "alac", "flac", "m4a", "mp3", "ogg", "opus", "wav",
+];
 const SUBTITLE_EXTENSIONS: &[&str] = &[
     "ass", "idx", "smi", "srt", "ssa", "sub", "sup", "ttml", "vtt",
 ];
@@ -510,6 +512,24 @@ impl DirectoryReader {
         timeout: Duration,
     ) -> Result<Option<Vec<DirInfo>>, Error> {
         with_timeout(timeout, self.next(cifs)).await
+    }
+
+    pub async fn next_media(&mut self, cifs: &mut Cifs) -> Result<Option<Vec<DirInfo>>, Error> {
+        let Some(mut entries) = self.next(cifs).await? else {
+            return Ok(None);
+        };
+
+        retain_media_entries(&mut entries);
+        sort_dir_entries(&mut entries);
+        Ok(Some(entries))
+    }
+
+    pub async fn next_media_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        timeout: Duration,
+    ) -> Result<Option<Vec<DirInfo>>, Error> {
+        with_timeout(timeout, self.next_media(cifs)).await
     }
 }
 
@@ -1418,6 +1438,7 @@ mod tests {
             fake_dir_entry(".Trash", true),
             fake_dir_entry("Episode 01.mkv", false),
             fake_dir_entry("Theme.FLAC", false),
+            fake_dir_entry("Commentary.opus", false),
             fake_dir_entry("Episode 01.srt", false),
             fake_dir_entry("cover.jpg", false),
             fake_dir_entry(".DS_Store", false),
@@ -1428,7 +1449,7 @@ mod tests {
 
         assert_eq!(
             filenames(&entries),
-            vec!["Movies", "Episode 01.mkv", "Theme.FLAC"]
+            vec!["Movies", "Episode 01.mkv", "Theme.FLAC", "Commentary.opus"]
         );
     }
 

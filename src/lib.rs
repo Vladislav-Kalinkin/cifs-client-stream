@@ -22,7 +22,7 @@ const DEFAULT_READ_AHEAD_CAPACITY: usize = 8 * 1024 * 1024;
 const DEFAULT_STREAM_CHUNK_SIZE: u16 = SMB_READ_MAX;
 
 pub use crate::smb::reply::{Handle, Share};
-pub use error::Error;
+pub use error::{Error, ErrorKind};
 pub use netbios::Error as NetbiosError;
 pub use ntlm::Auth;
 pub use ntlm::Error as NtlmError;

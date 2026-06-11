@@ -5,6 +5,7 @@ mod smb;
 mod utils;
 pub mod win;
 
+use std::collections::VecDeque;
 use std::io::SeekFrom;
 
 use bytes::{Bytes, BytesMut};
@@ -40,6 +41,16 @@ pub struct Cifs {
 pub struct FileStream {
     handle: Handle,
     position: u64,
+}
+
+#[derive(Debug)]
+pub struct ReadAhead {
+    stream: FileStream,
+    chunks: VecDeque<Bytes>,
+    buffered: usize,
+    capacity: usize,
+    chunk_size: u16,
+    eof: bool,
 }
 
 impl FileStream {
@@ -93,6 +104,79 @@ impl FileStream {
 
         self.position += chunk.len() as u64;
         Ok(Some(chunk))
+    }
+}
+
+impl ReadAhead {
+    pub fn new(stream: FileStream, capacity: usize, chunk_size: u16) -> Self {
+        Self {
+            stream,
+            chunks: VecDeque::new(),
+            buffered: 0,
+            capacity,
+            chunk_size,
+            eof: false,
+        }
+    }
+
+    pub fn stream(&self) -> &FileStream {
+        &self.stream
+    }
+
+    pub fn into_stream(self) -> FileStream {
+        self.stream
+    }
+
+    pub fn buffered_len(&self) -> usize {
+        self.buffered
+    }
+
+    pub fn is_eof(&self) -> bool {
+        self.eof && self.chunks.is_empty()
+    }
+
+    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+        self.chunks.clear();
+        self.buffered = 0;
+        self.eof = false;
+        self.stream.seek(pos)
+    }
+
+    pub async fn fill(&mut self, cifs: &mut Cifs) -> Result<(), Error> {
+        while self.can_buffer_more() && !self.eof {
+            let count = self.next_read_count();
+            match self.stream.read_next(cifs, count).await? {
+                Some(chunk) => self.push_chunk(chunk),
+                None => self.eof = true,
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn next(&mut self, cifs: &mut Cifs) -> Result<Option<Bytes>, Error> {
+        self.fill(cifs).await?;
+        Ok(self.pop_chunk())
+    }
+
+    fn can_buffer_more(&self) -> bool {
+        self.capacity > self.buffered && self.chunk_size > 0
+    }
+
+    fn next_read_count(&self) -> u16 {
+        let free = self.capacity - self.buffered;
+        read_count_for(free.min(usize::from(self.chunk_size)) as u64)
+    }
+
+    fn push_chunk(&mut self, chunk: Bytes) {
+        self.buffered += chunk.len();
+        self.chunks.push_back(chunk);
+    }
+
+    fn pop_chunk(&mut self) -> Option<Bytes> {
+        let chunk = self.chunks.pop_front()?;
+        self.buffered -= chunk.len();
+        Some(chunk)
     }
 }
 
@@ -159,6 +243,20 @@ impl Cifs {
         Ok(FileStream::new(self.openfile(share, path).await?))
     }
 
+    pub async fn open_read_ahead(
+        &mut self,
+        share: &Share,
+        path: &str,
+        capacity: usize,
+        chunk_size: u16,
+    ) -> Result<ReadAhead, Error> {
+        Ok(ReadAhead::new(
+            self.open_stream(share, path).await?,
+            capacity,
+            chunk_size,
+        ))
+    }
+
     pub async fn opendir(&mut self, share: &Share, path: &str) -> Result<Handle, Error> {
         self.command(msg::Open::dir(share.tid, sanitize_path(path)))
             .await
@@ -175,6 +273,10 @@ impl Cifs {
 
     pub async fn close_stream(&mut self, stream: FileStream) -> Result<(), Error> {
         self.close(stream.into_handle()).await
+    }
+
+    pub async fn close_read_ahead(&mut self, read_ahead: ReadAhead) -> Result<(), Error> {
+        self.close_stream(read_ahead.into_stream()).await
     }
 
     pub async fn read(&mut self, file: &Handle, offset: u64) -> Result<Bytes, Error> {
@@ -600,7 +702,8 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_count_for, resolve_smb_uri, seek_position, SMB_READ_MAX};
+    use super::{read_count_for, resolve_smb_uri, seek_position, ReadAhead, SMB_READ_MAX};
+    use bytes::Bytes;
     use std::io::SeekFrom;
 
     #[test]
@@ -622,6 +725,40 @@ mod tests {
     fn seek_position_rejects_negative_offsets() {
         assert!(seek_position(100, 10, SeekFrom::Current(-11)).is_err());
         assert!(seek_position(100, 10, SeekFrom::End(-101)).is_err());
+    }
+
+    #[test]
+    fn read_ahead_tracks_buffered_bytes() {
+        let mut buffer = ReadAhead::new(fake_stream(100), 10, 4);
+
+        buffer.push_chunk(Bytes::from_static(b"abcd"));
+        buffer.push_chunk(Bytes::from_static(b"ef"));
+
+        assert_eq!(buffer.buffered_len(), 6);
+        assert_eq!(buffer.pop_chunk().unwrap().as_ref(), b"abcd");
+        assert_eq!(buffer.buffered_len(), 2);
+        assert_eq!(buffer.pop_chunk().unwrap().as_ref(), b"ef");
+        assert_eq!(buffer.buffered_len(), 0);
+    }
+
+    #[test]
+    fn read_ahead_seek_clears_buffer() {
+        let mut buffer = ReadAhead::new(fake_stream(100), 10, 4);
+        buffer.push_chunk(Bytes::from_static(b"abcd"));
+
+        assert_eq!(buffer.seek(SeekFrom::Start(25)).unwrap(), 25);
+        assert_eq!(buffer.buffered_len(), 0);
+        assert_eq!(buffer.pop_chunk(), None);
+        assert!(!buffer.is_eof());
+    }
+
+    #[test]
+    fn read_ahead_next_read_count_respects_capacity() {
+        let mut buffer = ReadAhead::new(fake_stream(100), 10, 8);
+
+        assert_eq!(buffer.next_read_count(), 8);
+        buffer.push_chunk(Bytes::from_static(b"abcdef"));
+        assert_eq!(buffer.next_read_count(), 4);
     }
 
     #[test]
@@ -696,5 +833,23 @@ mod tests {
         assert_eq!(config.port, Some(445));
         assert_eq!(config.share, "interface");
         assert_eq!(config.path, Some("special/order/937.txt"));
+    }
+
+    fn fake_stream(size: u64) -> super::FileStream {
+        super::FileStream::new(super::Handle {
+            tid: 1,
+            fid: 2,
+            oplock: crate::win::OpLockLevel::empty(),
+            disposition: crate::win::CreateDisposition::OPEN,
+            create_time: 0,
+            access_time: 0,
+            write_time: 0,
+            change_time: 0,
+            attributes: crate::win::ExtFileAttr::empty(),
+            allocation_size: size,
+            size,
+            file_type: crate::win::ResourceType::DISK,
+            directory: false,
+        })
     }
 }

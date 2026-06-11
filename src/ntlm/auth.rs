@@ -1,10 +1,9 @@
-use rand::{RngCore, rngs::OsRng};
+use bytes::{BufMut, Bytes, BytesMut};
 use hex_literal::hex;
-use bytes::{Bytes, BytesMut, BufMut};
+use rand::{rngs::OsRng, RngCore};
 
+use super::{ChallengeMsg, Error};
 use crate::utils;
-use super::{Error, ChallengeMsg};
-
 
 #[derive(Debug, Clone)]
 pub struct Auth {
@@ -35,7 +34,10 @@ impl Auth {
         result
     }
 
-    pub(crate) fn ntlmv2_authenticate(&self, challenge_msg: &ChallengeMsg) -> Result<([u8; 16], Bytes), Error> {
+    pub(crate) fn ntlmv2_authenticate(
+        &self,
+        challenge_msg: &ChallengeMsg,
+    ) -> Result<([u8; 16], Bytes), Error> {
         let mut random = [0u8; 8];
         OsRng.fill_bytes(&mut random);
 
@@ -47,7 +49,6 @@ impl Auth {
         blob.put_u32_le(0);
         blob.extend_from_slice(&challenge_msg.info[..]);
         blob.put_u32_le(0);
-
 
         let mut data = BytesMut::with_capacity(challenge_msg.challenge.len() + blob.len());
         data.put(&challenge_msg.challenge[..]);
@@ -79,8 +80,8 @@ impl Auth {
 
 #[cfg(test)]
 mod tests {
-    use hex_literal::hex;
     use super::*;
+    use hex_literal::hex;
 
     #[test]
     fn ntlm_hash() {

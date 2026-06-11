@@ -1,13 +1,13 @@
-use bytes::{Bytes, Buf};
+use bytes::{Buf, Bytes};
 use chrono::{DateTime, Local};
 
 use crate::utils;
 use crate::win::*;
 
-use super::Error;
 use super::common::*;
 use super::info::*;
 use super::trans;
+use super::Error;
 
 /// Helper struct holding all relevant information of a reply
 /// to be used by create() method.
@@ -20,7 +20,6 @@ pub(crate) struct ReplyCtx {
     pub(super) data_offset: usize,
 }
 
-
 pub(crate) trait Reply: Sized {
     const CMD: Cmd;
     const ANDX: bool;
@@ -30,17 +29,17 @@ pub(crate) trait Reply: Sized {
     fn parse(info: Info, mut buffer: Bytes) -> Result<Self, Error> {
         let parameter_count = buffer.get_u8() as usize;
         let parameter_offset = SMB_HEADER_LEN + 1;
-        let mut parameter = buffer.copy_to_bytes(2*parameter_count);
+        let mut parameter = buffer.copy_to_bytes(2 * parameter_count);
 
         let data_count = buffer.get_u16_le() as usize;
-        let data_offset = parameter_offset + 2*parameter_count + 2;
+        let data_offset = parameter_offset + 2 * parameter_count + 2;
         let data = buffer.copy_to_bytes(data_count);
 
         // first parameter is AndX structure, if this command has one
-        if Self::ANDX {
-            if AndX::parse(&mut parameter)?.is_some() {
-                return Err(Error::Unsupported("AndX chaining is currently not supported".to_owned()));
-            }
+        if Self::ANDX && AndX::parse(&mut parameter)?.is_some() {
+            return Err(Error::Unsupported(
+                "AndX chaining is currently not supported".to_owned(),
+            ));
         }
 
         let ctx = ReplyCtx {
@@ -50,13 +49,12 @@ pub(crate) trait Reply: Sized {
             data_offset,
         };
 
-
         Self::create(ctx)
     }
 }
 
-
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ServerSetup {
     pub dialect: usize,
     pub security_mode: u8,
@@ -79,9 +77,10 @@ impl Reply for ServerSetup {
         // strictly there may only be one word, but we only support dialects above
         // NTLM 0.12 and therefor need at least 17 words.
         if ctx.parameter.len() < 17 {
-            return Err(Error::Unsupported("negotiate header with too few parameter".to_owned()));
+            return Err(Error::Unsupported(
+                "negotiate header with too few parameter".to_owned(),
+            ));
         }
-
 
         // parse parameter
         let mut parameter = ctx.parameter;
@@ -95,7 +94,6 @@ impl Reply for ServerSetup {
             return Err(Error::InvalidHeader);
         }
 
-
         let security_mode = parameter.get_u8();
         let max_mpx_count = parameter.get_u16_le();
         let max_number_vcs = parameter.get_u16_le();
@@ -107,7 +105,6 @@ impl Reply for ServerSetup {
         let timezone = parameter.get_u16_le();
         let challenge_length = parameter.get_u8() as usize;
 
-
         //
         // Now parse data
         //
@@ -118,7 +115,6 @@ impl Reply for ServerSetup {
             return Err(Error::InvalidData);
         }
         let challenge = data.copy_to_bytes(challenge_length);
-
 
         let reply = Self {
             dialect,
@@ -138,9 +134,9 @@ impl Reply for ServerSetup {
     }
 }
 
-
 /// SessionSetup is used for challenge-response authentication
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SessionSetup {
     pub guest_mode: bool,
     pub uid: u16,
@@ -152,8 +148,6 @@ impl Reply for SessionSetup {
     const ANDX: bool = true;
 
     fn create(ctx: ReplyCtx) -> Result<Self, Error> {
-
-
         // parse parameter
         let mut parameter = ctx.parameter;
         let action = parameter.get_u16_le();
@@ -183,7 +177,6 @@ impl Reply for SessionSetup {
     }
 }
 
-
 /// Share is returned by TreeConnect command and represents a mounted
 /// SMB share.
 ///
@@ -204,7 +197,6 @@ pub struct Share {
     pub tid: u16,
 }
 
-
 impl Reply for Share {
     const CMD: Cmd = Cmd::TreeConnect;
     const ANDX: bool = true;
@@ -212,7 +204,7 @@ impl Reply for Share {
     fn create(ctx: ReplyCtx) -> Result<Self, Error> {
         // parameter
         let mut parameter = ctx.parameter;
-        parameter.advance(2);       // ignore optional support
+        parameter.advance(2); // ignore optional support
 
         let access_rights = if parameter.remaining() >= 4 {
             Some(DirAccessMask::from_bits_truncate(parameter.get_u32_le()))
@@ -252,7 +244,6 @@ impl Reply for Share {
     }
 }
 
-
 /// Reply for COM_TREE_DISCONNECT message
 pub struct TreeDisconnect;
 
@@ -264,9 +255,6 @@ impl Reply for TreeDisconnect {
         Ok(Self)
     }
 }
-
-
-
 
 /// Handle is the struct returned by 'Create' SMB message and represents
 /// an opened file or directory. File and directory opererations will
@@ -312,14 +300,13 @@ impl Reply for Handle {
         let size = parameter.get_u64_le();
         let file_type = ResourceType::from_bits_truncate(parameter.get_u16_le());
 
-        parameter.advance(2);       // ignore 2 byte pipe status
+        parameter.advance(2); // ignore 2 byte pipe status
         let directory = match parameter.get_u8() {
             0 => false,
             1 => true,
 
             _ => return Err(Error::InvalidData),
         };
-
 
         let reply = Self {
             tid: ctx.info.tid,
@@ -341,7 +328,6 @@ impl Reply for Handle {
     }
 }
 
-
 /// SMB_COM_CLOSE Message (does not contain any information).
 pub struct Close;
 
@@ -354,7 +340,6 @@ impl Reply for Close {
     }
 }
 
-
 /// reply to SMB_COM_READ_ANDX message
 pub struct Read {
     pub data: Bytes,
@@ -364,18 +349,16 @@ impl Reply for Read {
     const CMD: Cmd = Cmd::Read;
     const ANDX: bool = true;
 
-
     fn create(ctx: ReplyCtx) -> Result<Self, Error> {
         // parameter
         let mut parameter = ctx.parameter;
-        parameter.advance(2);   // available (only for pipes)
-        parameter.advance(2);   // data compaction (reserved, should be 0)
-        parameter.advance(2);   // more reserved
+        parameter.advance(2); // available (only for pipes)
+        parameter.advance(2); // data compaction (reserved, should be 0)
+        parameter.advance(2); // more reserved
 
         let length = parameter.get_u16_le() as usize;
 
         // more reserved parameter...
-
 
         // data
         let mut data = ctx.data;
@@ -393,7 +376,6 @@ impl Reply for Read {
         Ok(Read { data: file_data })
     }
 }
-
 
 /// Reply to SMB_COM_DELETE (0x06), see 2.2.4.7 in CIFS
 pub struct Delete;
@@ -419,7 +401,6 @@ impl Reply for Rmdir {
     }
 }
 
-
 /// Reply to SMB_COM_NT_TRANSACT, see 2.2.4.62.2
 pub struct Transact<T> {
     pub subcmd: T,
@@ -444,27 +425,29 @@ impl<T: trans::SubReply> Reply for Transact<T> {
         let _data_displacement = ctx.parameter.get_u32_le();
 
         let setup_words = ctx.parameter.get_u8() as usize;
-        let sub_setup = ctx.parameter.copy_to_bytes(2*setup_words);
+        let sub_setup = ctx.parameter.copy_to_bytes(2 * setup_words);
 
         if parameter_count < total_parameter_count || data_count < total_data_count {
-            return Err(Error::Unsupported("transaction message split to multiple packets".to_owned()));
+            return Err(Error::Unsupported(
+                "transaction message split to multiple packets".to_owned(),
+            ));
         }
 
         // data
         let sub_parameter = if parameter_count > 0 {
-            let offset = utils::try_sub(raw_parameter_offset, ctx.data_offset)
-                .ok_or(Error::InvalidData)?;
+            let offset =
+                utils::try_sub(raw_parameter_offset, ctx.data_offset).ok_or(Error::InvalidData)?;
 
-            ctx.data.slice(offset..offset+parameter_count)
+            ctx.data.slice(offset..offset + parameter_count)
         } else {
             Bytes::new()
         };
 
         let sub_data = if data_count > 0 {
-            let offset = utils::try_sub(raw_data_offset, ctx.data_offset)
-                .ok_or(Error::InvalidData)?;
+            let offset =
+                utils::try_sub(raw_data_offset, ctx.data_offset).ok_or(Error::InvalidData)?;
 
-            ctx.data.slice(offset..offset+data_count)
+            ctx.data.slice(offset..offset + data_count)
         } else {
             Bytes::new()
         };
@@ -476,25 +459,27 @@ impl<T: trans::SubReply> Reply for Transact<T> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
+    use super::*;
     use bytes::BytesMut;
     use hex_literal::hex;
-    use super::*;
 
     #[test]
     fn parse_negotiate() {
-        let buffer = BytesMut::from(hex!(
+        let buffer = BytesMut::from(
+            hex!(
                 "1100000310000100041100000000010000000000fde300808e6db6b79b3ed801"
-                "0000001000f9fe3c88bf27b444bd3d74f7b2fdbf01").as_ref()).freeze();
+                "0000001000f9fe3c88bf27b444bd3d74f7b2fdbf01")
+            .as_ref(),
+        )
+        .freeze();
 
         // makeup header info, since parsing may depend on that data
         let info = Info::default(Cmd::Negotiate);
 
         // Negotiate returns a ServerSetup
-        let reply = ServerSetup::parse(info, buffer)
-            .expect("can't parse negotiate body");
+        let reply = ServerSetup::parse(info, buffer).expect("can't parse negotiate body");
 
         // check reply
         assert_eq!(reply.dialect, 0);
@@ -503,26 +488,28 @@ mod tests {
         assert_eq!(reply.max_number_vcs, 1);
         assert_eq!(reply.max_buffer_size, 4356);
         assert_eq!(reply.session_key, 0);
-        assert_eq!(reply.capabilities, Capabilities::EXTENDED_SECURITY
-                                     | Capabilities::INFOLEVEL_PASS
-                                     | Capabilities::LARGE_READX
-                                     | Capabilities::LARGE_WRITEX
-                                     | Capabilities::NT_FIND
-                                     | Capabilities::LOCK_AND_READ
-                                     | Capabilities::LEVEL2_OPLOCKS
-                                     | Capabilities::NTSTATUS
-                                     | Capabilities::REMOTE_APIS
-                                     | Capabilities::NT_SMBS
-                                     | Capabilities::LARGE_FILES
-                                     | Capabilities::UNICODE
-                                     | Capabilities::RAW_MODE);
+        assert_eq!(
+            reply.capabilities,
+            Capabilities::EXTENDED_SECURITY
+                | Capabilities::INFOLEVEL_PASS
+                | Capabilities::LARGE_READX
+                | Capabilities::LARGE_WRITEX
+                | Capabilities::NT_FIND
+                | Capabilities::LOCK_AND_READ
+                | Capabilities::LEVEL2_OPLOCKS
+                | Capabilities::NTSTATUS
+                | Capabilities::REMOTE_APIS
+                | Capabilities::NT_SMBS
+                | Capabilities::LARGE_FILES
+                | Capabilities::UNICODE
+                | Capabilities::RAW_MODE
+        );
 
         assert_eq!(reply.system_time.timestamp(), 1648029153);
 
         assert_eq!(reply.timezone, 0);
         assert_eq!(reply.challenge.len(), 0);
     }
-
 
     #[test]
     fn parse_session_setup() {
@@ -540,17 +527,19 @@ mod tests {
         let buffer = BytesMut::from(&blob[..]).freeze();
 
         let info = Info::default(Cmd::Negotiate);
-        let reply = SessionSetup::parse(info, buffer)
-            .expect("can't parse SessionSetup");
+        let reply = SessionSetup::parse(info, buffer).expect("can't parse SessionSetup");
 
-        assert_eq!(reply.guest_mode, false);
-        assert_eq!(reply.security_blob.as_ref(), hex!(
+        assert!(!reply.guest_mode);
+        assert_eq!(
+            reply.security_blob.as_ref(),
+            hex!(
             "4e544c4d5353500002000000140014003800000015828ae2d9102a72"
             "d8b439d200000000000000006c006c004c0000000501280a0000000f"
             "4b0049004500460045004c002d00490050004300020014004b004900"
             "4500460045004c002d00490050004300010014004b00490045004600"
             "45004c002d00490050004300040014004b0049004500460045004c00"
             "2d00490050004300030014004b0049004500460045004c002d004900"
-            "50004300060004000100000000000000"));
+            "50004300060004000100000000000000")
+        );
     }
 }

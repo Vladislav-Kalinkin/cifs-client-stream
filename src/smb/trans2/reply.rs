@@ -1,9 +1,9 @@
-use bytes::{Bytes, Buf};
+use bytes::{Buf, Bytes};
 
-use crate::utils;
-use crate::smb::Error;
 use crate::smb::info::Cmd;
 use crate::smb::reply::{Reply, ReplyCtx};
+use crate::smb::Error;
+use crate::utils;
 
 /// Reply to SMB_COM_TRANSACTION2, see 2.2.4.46.2
 pub(crate) struct Transact2 {
@@ -24,7 +24,7 @@ impl Reply for Transact2 {
         // parameter
         let total_parameter_count = ctx.parameter.get_u16_le() as usize;
         let total_data_count = ctx.parameter.get_u16_le() as usize;
-        ctx.parameter.advance(2);   // reserved
+        ctx.parameter.advance(2); // reserved
 
         let parameter_count = ctx.parameter.get_u16_le() as usize;
         let parameter_offset = utils::try_sub(ctx.parameter.get_u16_le().into(), ctx.data_offset)
@@ -34,11 +34,13 @@ impl Reply for Transact2 {
         let data_count = ctx.parameter.get_u16_le() as usize;
         let data_offset = utils::try_sub(ctx.parameter.get_u16_le().into(), ctx.data_offset)
             .ok_or(Error::InvalidData)?;
-        let data_displacement = ctx.parameter.get_u16_le() as usize;   // ignoring data displacement
+        let data_displacement = ctx.parameter.get_u16_le() as usize; // ignoring data displacement
 
         // data
-        let sub_parameter = ctx.data.slice(parameter_offset..parameter_offset+parameter_count);
-        let sub_data = ctx.data.slice(data_offset..data_offset+data_count);
+        let sub_parameter = ctx
+            .data
+            .slice(parameter_offset..parameter_offset + parameter_count);
+        let sub_data = ctx.data.slice(data_offset..data_offset + data_count);
 
         let reply = Self {
             parameter: sub_parameter,

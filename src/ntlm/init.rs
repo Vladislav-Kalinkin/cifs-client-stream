@@ -1,5 +1,5 @@
 use bitflags::bitflags;
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 use super::packet::Packet;
 use super::*;
@@ -67,7 +67,6 @@ struct Origin {
     domain: String,
 }
 
-
 pub struct InitMsg {
     flags: Flags,
     origin: Option<Origin>,
@@ -94,13 +93,16 @@ impl InitMsg {
 
     #[allow(dead_code)]
     pub fn set_version(&mut self, major: u8, minor: u8, build: u16) {
-        self.version = Some(Version { major, minor, build });
+        self.version = Some(Version {
+            major,
+            minor,
+            build,
+        });
     }
 
     pub fn set_default_version(&mut self) {
         self.version = Some(Version::default());
     }
-
 
     pub fn to_bytes(&self) -> Result<Bytes, Error> {
         let mut packet = Packet::new();
@@ -123,8 +125,8 @@ impl InitMsg {
 
 #[cfg(test)]
 mod tests {
-    use hex_literal::hex;
     use super::*;
+    use hex_literal::hex;
 
     #[test]
     fn create_init() {
@@ -132,12 +134,14 @@ mod tests {
          * Generate message type 1 example from
          * http://davenport.sourceforge.net/ntlm.html
          */
-        let mut init_msg = InitMsg::new(Flags::UNICODE
-                                      | Flags::OEM
-                                      | Flags::REQUEST_TARGET
-                                      | Flags::NTLM
-                                      | Flags::DOMAIN_SUPPLIED
-                                      | Flags::WORKSTATION_SUPPLIED);
+        let mut init_msg = InitMsg::new(
+            Flags::UNICODE
+                | Flags::OEM
+                | Flags::REQUEST_TARGET
+                | Flags::NTLM
+                | Flags::DOMAIN_SUPPLIED
+                | Flags::WORKSTATION_SUPPLIED,
+        );
 
         init_msg.set_origin("DOMAIN", "WORKSTATION");
         init_msg.set_version(5, 0, 2195);
@@ -145,7 +149,6 @@ mod tests {
         let buffer = init_msg
             .to_bytes()
             .expect("error writing NTLM init message");
-
 
         /* i swapped positions of domain and workstation data */
         let expected = hex!(

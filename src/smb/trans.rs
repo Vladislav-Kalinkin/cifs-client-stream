@@ -1,9 +1,9 @@
 use bitflags::bitflags;
-use bytes::{Bytes, Buf, BytesMut, BufMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::win::NotifyAction;
-use crate::utils;
 use super::Error;
+use crate::utils;
+use crate::win::NotifyAction;
 
 /// Specification of a Subcommand that can be used in msg::Transact messages
 pub trait SubCmd {
@@ -11,7 +11,6 @@ pub trait SubCmd {
     const MAX_SETUP_COUNT: u8;
     const MAX_PARAM_COUNT: u32;
     const MAX_DATA_COUNT: u32;
-
 
     fn setup(&self) -> Result<Bytes, Error> {
         Ok(Bytes::new())
@@ -27,12 +26,11 @@ pub trait SubCmd {
 }
 
 pub trait SubReply: Sized {
+    #[allow(dead_code)]
     const ID: u16;
 
     fn parse(setup: Bytes, parameter: Bytes, data: Bytes) -> Result<Self, Error>;
 }
-
-
 
 /// NT_TRANSACT_NOTIFY_CHANGE Subcommand for msg::Transact, see 2.2.7.4:
 /// This command notifies the client of anything that changed in the directory
@@ -61,7 +59,6 @@ bitflags! {
         const STREAM_WRITE      = 0x00000800;
     }
 }
-
 
 impl NotifySetup {
     pub fn new(fid: u16, mode: NotifyMode, recursive: bool) -> Self {
@@ -101,9 +98,10 @@ impl Notification {
             return Err(Error::InvalidData);
         }
 
-        let action = buffer.get_u32_le()
-                           .try_into()
-                           .map_err(|_| Error::InvalidData)?;
+        let action = buffer
+            .get_u32_le()
+            .try_into()
+            .map_err(|_| Error::InvalidData)?;
 
         let filename_length = buffer.get_u32_le() as usize;
 
@@ -118,7 +116,6 @@ impl Notification {
     }
 }
 
-
 impl SubReply for Notification {
     const ID: u16 = 4;
 
@@ -128,7 +125,7 @@ impl SubReply for Notification {
 
         loop {
             let mut parser = parameter.slice(start..);
-            if parser.len() == 0 {
+            if parser.is_empty() {
                 break;
             }
             if parser.len() < 4 {

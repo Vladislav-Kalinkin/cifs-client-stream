@@ -1,12 +1,12 @@
 use std::fmt;
 
 use bitflags::bitflags;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
-use bytes::{Bytes, Buf, BytesMut, BufMut};
 
-use crate::win::NTStatus;
-use super::Error;
 use super::common::{SMB_HEADER_LEN, SMB_MAGIC};
+use super::Error;
+use crate::win::NTStatus;
 
 /// Info is the information from SMB header
 #[derive(Debug)]
@@ -28,7 +28,7 @@ impl Info {
             flags1: Flags1::default(),
             flags2: Flags2::default(),
             status: Status::Known(NTStatus::SUCCESS),
-            pid: 0xfeff,        // 0xffff in pid_low is not allowed by spec
+            pid: 0xfeff, // 0xffff in pid_low is not allowed by spec
             tid: 0xffff,
             uid: 0,
             mid: 0,
@@ -53,8 +53,8 @@ impl Info {
         let flags2 = Flags2::from_bits_truncate(buffer.get_u16_le());
         let pid_high = buffer.get_u16_le();
 
-        buffer.advance(8);  // ignore 64bit "signature"
-        buffer.advance(2);  // ignore 2 bytes reserved data
+        buffer.advance(8); // ignore 64bit "signature"
+        buffer.advance(2); // ignore 2 bytes reserved data
 
         let tid = buffer.get_u16_le();
         let pid_low = buffer.get_u16_le();
@@ -66,7 +66,6 @@ impl Info {
         if !flags1.contains(Flags1::REPLY) {
             return Err(Error::ReplyExpected);
         }
-
 
         let info = Info {
             cmd,
@@ -87,21 +86,20 @@ impl Info {
         let pid_low = (self.pid & 0xffff) as u16;
 
         // write header
-        buffer.put(&SMB_MAGIC[..]);
+        buffer.put(SMB_MAGIC);
         buffer.put_u8(self.cmd as u8);
         buffer.put_u32_le(self.status.into());
         buffer.put_u8(self.flags1.bits());
         buffer.put_u16_le(self.flags2.bits());
         buffer.put_u16_le(pid_high);
-        buffer.put_bytes(0, 8);         // write zero "signature"
-        buffer.put_bytes(0, 2);         // 2 bytes reserved
+        buffer.put_bytes(0, 8); // write zero "signature"
+        buffer.put_bytes(0, 2); // 2 bytes reserved
         buffer.put_u16_le(self.tid);
         buffer.put_u16_le(pid_low);
         buffer.put_u16_le(self.uid);
         buffer.put_u16_le(self.mid);
     }
 }
-
 
 bitflags! {
     pub struct Flags1: u8 {
@@ -138,14 +136,13 @@ impl Flags1 {
 impl Flags2 {
     pub fn default() -> Self {
         Flags2::UNICODE
-      | Flags2::NTSTATUS
-      | Flags2::EXTENDED_SECURITY
-      | Flags2::LONG_NAMES_USED
-      | Flags2::EAS
-      | Flags2::LONG_NAMES_ALLOWED
+            | Flags2::NTSTATUS
+            | Flags2::EXTENDED_SECURITY
+            | Flags2::LONG_NAMES_USED
+            | Flags2::EAS
+            | Flags2::LONG_NAMES_ALLOWED
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -190,7 +187,6 @@ impl Status {
     }
 }
 
-
 /// Cmd defines the command codes for SMB header and AndX structure
 #[derive(Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
@@ -209,13 +205,12 @@ pub enum Cmd {
     NoCommand = 0xff,
 }
 
-
 #[cfg(test)]
 mod tests {
-    use bytes::BytesMut;
-    use hex_literal::hex;
     use super::*;
     use crate::smb::common::SMB_MAX_LEN;
+    use bytes::BytesMut;
+    use hex_literal::hex;
 
     #[test]
     fn write_header() {
@@ -224,29 +219,36 @@ mod tests {
         let info = Info::default(Cmd::Negotiate);
         info.write(&mut buffer);
 
-        assert_eq!(buffer.as_ref(), hex!("ff534d4272000000001843c8000000000000000000000000fffffffe00000000"));
+        assert_eq!(
+            buffer.as_ref(),
+            hex!("ff534d4272000000001843c8000000000000000000000000fffffffe00000000")
+        );
     }
 
     #[test]
     fn parse_header() {
-        let mut buffer = Bytes::from(hex!(
-                "ff534d4272000000009853c8000000000000000000000000fffffffe00000000"
-            ).as_ref());
+        let mut buffer = Bytes::from(
+            hex!("ff534d4272000000009853c8000000000000000000000000fffffffe00000000").as_ref(),
+        );
 
         let info = Info::parse(&mut buffer).expect("can't parse SMB header");
 
         assert_eq!(info.status, Status::Known(NTStatus::SUCCESS));
-        assert_eq!(info.flags1, Flags1::REPLY
-                              | Flags1::CASE_INSENSITIVE
-                              | Flags1::CANONICAL_PATHS);
+        assert_eq!(
+            info.flags1,
+            Flags1::REPLY | Flags1::CASE_INSENSITIVE | Flags1::CANONICAL_PATHS
+        );
 
-        assert_eq!(info.flags2, Flags2::UNICODE
-                              | Flags2::NTSTATUS
-                              | Flags2::EXTENDED_SECURITY
-                              | Flags2::LONG_NAMES_USED
-                              | Flags2::SIGNATURE_REQUIRED
-                              | Flags2::EAS
-                              | Flags2::LONG_NAMES_ALLOWED);
+        assert_eq!(
+            info.flags2,
+            Flags2::UNICODE
+                | Flags2::NTSTATUS
+                | Flags2::EXTENDED_SECURITY
+                | Flags2::LONG_NAMES_USED
+                | Flags2::SIGNATURE_REQUIRED
+                | Flags2::EAS
+                | Flags2::LONG_NAMES_ALLOWED
+        );
 
         assert_eq!(info.pid, 65279);
         assert_eq!(info.tid, 0xffff);

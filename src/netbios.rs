@@ -1,9 +1,9 @@
 use std::fmt;
 
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
-use tokio::net::TcpStream;
-use bytes::{Bytes, Buf, BytesMut, BufMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 use crate::utils::encode_netbios_name;
 
@@ -29,7 +29,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::IoError(what) => write!(f, "io error: {}", what),
-            Error::CreateSession(code) => write!(f, "can't create NBT session: error code 0x{:02x}", code),
+            Error::CreateSession(code) => {
+                write!(f, "can't create NBT session: error code 0x{:02x}", code)
+            }
             Error::InvalidFrameType(v) => write!(f, "invalid NetBIOS message type: 0x{:02x}", v),
             Error::InvalidFrame => write!(f, "invalid NetBIOS frame"),
             Error::FrameTooBig => write!(f, "frame exceeds maximal size"),
@@ -51,7 +53,6 @@ impl From<std::num::TryFromIntError> for Error {
     }
 }
 
-
 enum Frame {
     Message(Bytes),
     SessionRequest(Bytes),
@@ -62,17 +63,15 @@ enum Frame {
 }
 
 #[derive(IntoPrimitive, TryFromPrimitive)]
-#[allow(non_camel_case_types)]
 #[repr(u8)]
 enum FrameType {
-    MESSAGE = 0x00,
-    SESSION_REQUEST = 0x81,
-    POSITIVE_RESPONSE = 0x82,
-    NEGATIVE_RESPONSE = 0x83,
-    RETARGET = 0x84,
-    KEEPALIVE = 0x85,
+    Message = 0x00,
+    SessionRequest = 0x81,
+    PositiveResponse = 0x82,
+    NegativeResponse = 0x83,
+    Retarget = 0x84,
+    Keepalive = 0x85,
 }
-
 
 impl Frame {
     fn new(raw_frame_type: u8, frame_data: Bytes) -> Result<Frame, Error> {
@@ -80,45 +79,53 @@ impl Frame {
             .map_err(|_| Error::InvalidFrameType(raw_frame_type))?;
 
         match frame_type {
-            FrameType::MESSAGE => Ok(Frame::Message(frame_data)),
+            FrameType::Message => Ok(Frame::Message(frame_data)),
 
-            FrameType::SESSION_REQUEST => Ok(Frame::SessionRequest(frame_data)),
+            FrameType::SessionRequest => Ok(Frame::SessionRequest(frame_data)),
 
-            FrameType::POSITIVE_RESPONSE => if frame_data.len() != 0 {
-                Err(Error::InvalidFrame)
-            } else {
-                Ok(Frame::PositiveResponse)
-            },
-
-            FrameType::NEGATIVE_RESPONSE => if frame_data.len() != 1 {
-                Err(Error::InvalidFrame)
-            } else {
-                Ok(Frame::NegativeResponse(frame_data[0]))
+            FrameType::PositiveResponse => {
+                if !frame_data.is_empty() {
+                    Err(Error::InvalidFrame)
+                } else {
+                    Ok(Frame::PositiveResponse)
+                }
             }
 
-            FrameType::RETARGET => if frame_data.len() != 6 {
-                Err(Error::InvalidFrame)
-            } else {
-                // TODO should parse ip address and port here
-                Ok(Frame::Retarget)
+            FrameType::NegativeResponse => {
+                if frame_data.len() != 1 {
+                    Err(Error::InvalidFrame)
+                } else {
+                    Ok(Frame::NegativeResponse(frame_data[0]))
+                }
             }
 
-            FrameType::KEEPALIVE => if frame_data.len() != 0 {
-                Err(Error::InvalidFrame)
-            } else {
-                Ok(Frame::Keepalive)
+            FrameType::Retarget => {
+                if frame_data.len() != 6 {
+                    Err(Error::InvalidFrame)
+                } else {
+                    // TODO should parse ip address and port here
+                    Ok(Frame::Retarget)
+                }
+            }
+
+            FrameType::Keepalive => {
+                if !frame_data.is_empty() {
+                    Err(Error::InvalidFrame)
+                } else {
+                    Ok(Frame::Keepalive)
+                }
             }
         }
     }
 
     fn get_type(&self) -> FrameType {
         match self {
-            Frame::Message(_) => FrameType::MESSAGE,
-            Frame::SessionRequest(_) => FrameType::SESSION_REQUEST,
-            Frame::PositiveResponse => FrameType::POSITIVE_RESPONSE,
-            Frame::NegativeResponse(_) => FrameType::NEGATIVE_RESPONSE,
-            Frame::Retarget => FrameType::RETARGET,
-            Frame::Keepalive => FrameType::KEEPALIVE,
+            Frame::Message(_) => FrameType::Message,
+            Frame::SessionRequest(_) => FrameType::SessionRequest,
+            Frame::PositiveResponse => FrameType::PositiveResponse,
+            Frame::NegativeResponse(_) => FrameType::NegativeResponse,
+            Frame::Retarget => FrameType::Retarget,
+            Frame::Keepalive => FrameType::Keepalive,
         }
     }
 
@@ -138,7 +145,6 @@ impl Frame {
                 Ok(encoding.freeze())
             }
 
-
             Frame::SessionRequest(msg) => {
                 if msg.len() != 68 {
                     return Err(Error::InvalidFrame);
@@ -151,17 +157,14 @@ impl Frame {
                 Ok(encoding.freeze())
             }
 
-            _ => Err(Error::InvalidFrame)
+            _ => Err(Error::InvalidFrame),
         }
     }
-
 }
 
 impl NetBios {
     pub fn from_stream(stream: TcpStream) -> Self {
-        Self {
-            stream
-        }
+        Self { stream }
     }
 
     pub async fn open_raw(host: &str, port: u16) -> Result<Self, Error> {
@@ -185,7 +188,6 @@ impl NetBios {
         Ok(netbios)
     }
 
-
     pub async fn send_message(&mut self, msg: Bytes) -> Result<(), Error> {
         self.send(Frame::Message(msg)).await
     }
@@ -201,9 +203,7 @@ impl NetBios {
         }
     }
 
-    async fn create_session(&mut self, dst: &str, src: &str)
-        -> Result<(), Error>
-    {
+    async fn create_session(&mut self, dst: &str, src: &str) -> Result<(), Error> {
         let mut msgbuf = BytesMut::with_capacity(68);
 
         msgbuf.put_u8(0x20);
@@ -222,9 +222,6 @@ impl NetBios {
             _ => Err(Error::InvalidFrame),
         }
     }
-
-
-
 
     async fn send(&mut self, frame: Frame) -> Result<(), Error> {
         self.write_exactly(frame.encode()?).await
@@ -253,10 +250,7 @@ impl NetBios {
         Frame::new(msg_type, msg_data)
     }
 
-
-    async fn read_exactly(&mut self, mut count: usize)
-        -> Result<Bytes, Error>
-    {
+    async fn read_exactly(&mut self, mut count: usize) -> Result<Bytes, Error> {
         tracing::debug!("reading {} bytes...", count);
         let mut buffer = BytesMut::with_capacity(count);
         let mut chunk = (&mut self.stream).take(count as u64);
@@ -276,7 +270,7 @@ impl NetBios {
     async fn write_exactly(&mut self, mut buffer: Bytes) -> Result<(), Error> {
         tracing::debug!("writting {} bytes...", buffer.remaining());
         while buffer.has_remaining() {
-            let _ = self.stream.write_buf(&mut buffer).await?;
+            self.stream.write_buf(&mut buffer).await?;
         }
         self.stream.flush().await?;
         Ok(())

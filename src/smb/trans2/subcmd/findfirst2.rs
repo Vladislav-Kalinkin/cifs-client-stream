@@ -1,11 +1,10 @@
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::utils;
-use crate::smb::Error;
 use crate::smb::common::{FindFlags, FindInfoLevel};
-use crate::win::FileAttr;
 use crate::smb::trans2::SubCmd;
-
+use crate::smb::Error;
+use crate::utils;
+use crate::win::FileAttr;
 
 /// Implementation of TRANS2_FIND_FIRST2 transaction2 sub-command from 2.2.6.2.1.
 ///
@@ -18,7 +17,6 @@ pub struct FindFirst2 {
     filename: String,
 }
 
-
 impl FindFirst2 {
     pub fn new(filename: String, search: FileAttr) -> Self {
         Self {
@@ -29,8 +27,6 @@ impl FindFirst2 {
         }
     }
 }
-
-
 
 impl SubCmd for FindFirst2 {
     const SETUP: u16 = 0x0001;
@@ -48,7 +44,7 @@ impl SubCmd for FindFirst2 {
         parameter.put_u16_le(self.count);
         parameter.put_u16_le(self.flags.bits());
         parameter.put_u16_le(FindInfoLevel::DIRECTORY_INFO.bits());
-        parameter.put_u32_le(0);            // storage type must be 0
+        parameter.put_u32_le(0); // storage type must be 0
         parameter.put(filename.as_ref());
 
         Ok(parameter.freeze())

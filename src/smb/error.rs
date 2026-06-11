@@ -4,9 +4,8 @@ use std::string::FromUtf8Error;
 
 use num_enum::TryFromPrimitiveError;
 
-use crate::utils;
 use super::info::Cmd;
-
+use crate::utils;
 
 #[derive(Debug)]
 pub enum Error {

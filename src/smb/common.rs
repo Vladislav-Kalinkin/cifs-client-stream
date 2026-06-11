@@ -1,12 +1,12 @@
 use bitflags::bitflags;
-use bytes::{Bytes, Buf, BytesMut, BufMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use chrono::{DateTime, Local};
 
 use crate::utils;
 use crate::win::ExtFileAttr;
 
-use super::Error;
 use super::info::Cmd;
+use super::Error;
 
 pub(crate) const SMB_MAX_LEN: usize = 4096;
 pub(crate) const SMB_HEADER_LEN: usize = 32;
@@ -14,7 +14,6 @@ pub(crate) const SMB_MAGIC: &[u8] = b"\xffSMB";
 pub(crate) const SMB_SUPPORTED_DIALECTS: &[&str] = &["NT LM 0.12"];
 pub(crate) const SMB_READ_MIN: u16 = 32768;
 pub(crate) const SMB_READ_MAX: u16 = 65534;
-
 
 bitflags! {
     pub struct Capabilities: u32 {
@@ -51,7 +50,7 @@ pub struct AndX {
 impl AndX {
     pub fn parse(buffer: &mut Bytes) -> Result<Option<Self>, Error> {
         let cmd = buffer.get_u8();
-        buffer.advance(1);                  // ignore 1 byte reserved data
+        buffer.advance(1); // ignore 1 byte reserved data
         let offset = buffer.get_u16_le();
 
         if cmd == 0xff {
@@ -98,7 +97,7 @@ impl DirInfo {
         // directory info normally starts with a "next entry offset" (u32le)
         // which i moved outside of this structure
 
-        data.advance(4);    // ignore file index as recommended by spec
+        data.advance(4); // ignore file index as recommended by spec
 
         let creation_time = utils::decode_windows_time(data.get_u64_le());
         let access_time = utils::decode_windows_time(data.get_u64_le());
@@ -106,7 +105,7 @@ impl DirInfo {
         let change_time = utils::decode_windows_time(data.get_u64_le());
 
         let filesize = data.get_u64_le();
-        data.advance(8);    // ignore allocation size, as we don't need it
+        data.advance(8); // ignore allocation size, as we don't need it
         let attributes = ExtFileAttr::from_bits_truncate(data.get_u32_le());
         let filename_length = data.get_u32_le() as usize;
 

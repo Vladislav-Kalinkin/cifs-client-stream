@@ -1,11 +1,11 @@
-use std::iter;
-use chrono::{DateTime, TimeZone, Utc, Local, Duration};
+use bytes::{Buf, Bytes};
+use chrono::{DateTime, Duration, Local, TimeZone, Utc};
+use des::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
+use des::Des;
+use hmac::{Hmac, Mac};
 use md4::Md4;
 use md5::{Digest, Md5};
-use hmac::{Hmac, Mac};
-use des::Des;
-use des::cipher::{KeyInit, BlockEncrypt, generic_array::GenericArray};
-use bytes::{Bytes, Buf};
+use std::iter;
 
 pub fn encode_netbios_name(name: &str) -> String {
     name.chars()
@@ -13,7 +13,7 @@ pub fn encode_netbios_name(name: &str) -> String {
         .chain(iter::repeat(' '))
         .take(16)
         .flat_map(|c| {
-            let h = char::from_u32(65 + (c as u32/16)).unwrap();
+            let h = char::from_u32(65 + (c as u32 / 16)).unwrap();
             let l = char::from_u32(65 + (c as u32 % 16)).unwrap();
             [h, l]
         })
@@ -24,13 +24,19 @@ pub fn encode_netbios_name(name: &str) -> String {
 /// number of 100-nanosecond intervals that have elapsed since January
 /// 1, 1601 in UTC.
 pub fn decode_windows_time(time: u64) -> DateTime<Local> {
-    let base_time = Utc.ymd(1601, 1, 1).and_hms(0, 0, 0);
-    let delta = Duration::microseconds((time/10) as i64);
+    let base_time = Utc
+        .with_ymd_and_hms(1601, 1, 1, 0, 0, 0)
+        .single()
+        .expect("Windows epoch is a valid UTC timestamp");
+    let delta = Duration::microseconds((time / 10) as i64);
     (base_time + delta).into()
 }
 
 pub fn encode_windows_time<Tz: TimeZone>(time: DateTime<Tz>) -> u64 {
-    let base_time = Utc.ymd(1601, 1, 1).and_hms(0, 0, 0);
+    let base_time = Utc
+        .with_ymd_and_hms(1601, 1, 1, 0, 0, 0)
+        .single()
+        .expect("Windows epoch is a valid UTC timestamp");
     let duration = time
         .signed_duration_since(base_time)
         .num_microseconds()
@@ -45,8 +51,8 @@ pub fn get_windows_time() -> u64 {
 }
 
 pub fn hmac_md5_oneshot(key: &[u8], data: &[u8]) -> [u8; 16] {
-    let mut mac = <Hmac::<Md5> as Mac>::new_from_slice(key)
-            .expect("Invalid key length in HMAC - this should not happen");
+    let mut mac = <Hmac<Md5> as Mac>::new_from_slice(key)
+        .expect("Invalid key length in HMAC - this should not happen");
 
     mac.update(data);
     mac.finalize().into_bytes().into()
@@ -58,20 +64,16 @@ pub fn md4_oneshot(data: &[u8]) -> [u8; 16] {
     hasher.finalize().into()
 }
 
-
 pub fn decode_utf16le(raw: &[u8]) -> Result<String, std::char::DecodeUtf16Error> {
     let iter = (0..raw.len())
         .step_by(2)
-        .map(|i| u16::from_le_bytes([raw[i], raw[i+1]]));
+        .map(|i| u16::from_le_bytes([raw[i], raw[i + 1]]));
 
     std::char::decode_utf16(iter).collect()
 }
 
 pub fn encode_utf16le(msg: &str) -> Vec<u8> {
-    msg.encode_utf16()
-       .map(|c| c.to_le_bytes())
-       .flatten()
-       .collect()
+    msg.encode_utf16().flat_map(|c| c.to_le_bytes()).collect()
 }
 
 pub fn encode_utf16le_0(msg: &str) -> Vec<u8> {
@@ -92,8 +94,7 @@ pub fn parse_str_0(buffer: &mut Bytes) -> Result<String, ParseStrError> {
     while buffer.has_remaining() {
         let c = buffer.get_u8();
         if c == 0 {
-            return String::from_utf8(data)
-                .map_err(|_| ParseStrError::InvalidUnicode);
+            return String::from_utf8(data).map_err(|_| ParseStrError::InvalidUnicode);
         }
 
         data.push(c);
@@ -108,7 +109,7 @@ pub fn parse_utf16le_0(buffer: &mut Bytes) -> Result<String, ParseStrError> {
     while buffer.remaining() >= 2 {
         let next = buffer.get_u16_le();
         if next == 0 {
-            return std::char::decode_utf16(data.into_iter())
+            return std::char::decode_utf16(data)
                 .map(|c| c.map_err(|_| ParseStrError::InvalidUnicode))
                 .collect();
         }
@@ -128,7 +129,7 @@ pub fn sanitize_path(path: &str) -> String {
 
 /// returns the smallest r := 4*k with r >= n
 pub fn round_up_4n(n: usize) -> usize {
-    4 * ((n+3) / 4)
+    4 * n.div_ceil(4)
 }
 
 /// returns round_up_4n(n) - n
@@ -145,16 +146,15 @@ pub fn try_sub(a: usize, b: usize) -> Option<usize> {
     }
 }
 
-
 fn expand_des_key(data: &[u8]) -> [u8; 8] {
     let mut padded = [0u8; 8];
-    padded[1..1+data.len()].clone_from_slice(data);
+    padded[1..1 + data.len()].clone_from_slice(data);
 
     let mut value = u64::from_be_bytes(padded);
     let mut result: u64 = 0;
 
     for i in 0..8 {
-        result |= (value & 0x7f) << (i*8+1);
+        result |= (value & 0x7f) << (i * 8 + 1);
         value >>= 7;
     }
 
@@ -165,12 +165,9 @@ pub fn des_oneshot(secret: &[u8], input: &[u8], output: &mut [u8]) {
     let key = expand_des_key(secret);
     let cipher = Des::new_from_slice(&key).unwrap();
     let array_in = GenericArray::from_slice(input);
-    let mut array_out = GenericArray::from_mut_slice(output);
-    cipher.encrypt_block_b2b(&array_in, &mut array_out);
+    let array_out = GenericArray::from_mut_slice(output);
+    cipher.encrypt_block_b2b(array_in, array_out);
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -181,9 +178,10 @@ mod tests {
         let start = Utc::now();
         let wintime = encode_windows_time(start);
         let check = decode_windows_time(wintime);
-        let delta = check.signed_duration_since(start)
-                         .num_microseconds()
-                         .unwrap();
+        let delta = check
+            .signed_duration_since(start)
+            .num_microseconds()
+            .unwrap();
 
         assert_eq!(delta, 0);
     }

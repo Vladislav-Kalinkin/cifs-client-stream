@@ -1,7 +1,7 @@
-use bytes::{Bytes, Buf, BytesMut, BufMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::utils;
 use super::Error;
+use crate::utils;
 
 pub struct Buffer {
     pub length: usize,
@@ -15,7 +15,11 @@ impl Buffer {
         let capacity = buffer.get_u16_le() as usize;
         let position = buffer.get_u32_le() as usize;
 
-        let buffer = Buffer { length, capacity, position };
+        let buffer = Buffer {
+            length,
+            capacity,
+            position,
+        };
 
         Ok(buffer)
     }
@@ -40,14 +44,11 @@ impl Buffer {
         let raw = self.extract(buffer);
 
         if unicode {
-            utils::decode_utf16le(raw.as_ref())
-                .map_err(|_| Error::InvalidPacket)
-
+            utils::decode_utf16le(raw.as_ref()).map_err(|_| Error::InvalidPacket)
         } else {
             // just treat as utf8, i know this is not exactly correct since
             // it might use non-ascii characters from DOS codepage.. YOLO!
-            String::from_utf8(Vec::from(raw.as_ref()))
-                .map_err(|_| Error::InvalidPacket)
+            String::from_utf8(Vec::from(raw.as_ref())).map_err(|_| Error::InvalidPacket)
         }
     }
 }

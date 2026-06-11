@@ -1,7 +1,6 @@
-use bytes::{Bytes, Buf};
+use bytes::{Buf, Bytes};
 
-use crate::smb::{Error, DirInfo, trans2::SubReply};
-
+use crate::smb::{trans2::SubReply, DirInfo, Error};
 
 /// Reply to TRANS2_FIND_FIRST2, see 2.2.6.2.2
 pub struct FindFirst2 {
@@ -29,7 +28,6 @@ impl SubReply for FindFirst2 {
         // I hope, that the last dir info is allways simply the last in the following
         // list so we don't need the offset...
         //let last_entry_offset = parameter.get_u16_le();
-
 
         // parse subreply data
         let mut info = Vec::with_capacity(count);
@@ -70,11 +68,7 @@ impl SubReply for FindFirst2 {
             return Err(Error::InvalidData);
         }
 
-        let subreply = FindFirst2 {
-            sid,
-            end,
-            info,
-        };
+        let subreply = FindFirst2 { sid, end, info };
 
         Ok(subreply)
     }

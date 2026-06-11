@@ -1,11 +1,11 @@
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::utils;
 use crate::smb::{
-    Error,
     common::{FindFlags, FindInfoLevel},
     trans2::SubCmd,
+    Error,
 };
+use crate::utils;
 
 /// TRANS2_FIND_NEXT2 sub command, see 2.2.6.3.1
 pub struct FindNext2<'a> {
@@ -14,7 +14,6 @@ pub struct FindNext2<'a> {
     flags: FindFlags,
     filename: &'a str,
 }
-
 
 impl<'a> FindNext2<'a> {
     pub fn new(sid: u16, filename: &'a str) -> Self {
@@ -42,7 +41,7 @@ impl<'a> SubCmd for FindNext2<'a> {
         parameter.put_u16_le(self.sid);
         parameter.put_u16_le(self.count);
         parameter.put_u16_le(FindInfoLevel::DIRECTORY_INFO.bits());
-        parameter.put_u32_le(0);    // resume key seems to be always 0?
+        parameter.put_u32_le(0); // resume key seems to be always 0?
         parameter.put_u16_le(self.flags.bits());
         parameter.put(filename.as_ref());
 

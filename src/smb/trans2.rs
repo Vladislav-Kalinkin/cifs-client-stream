@@ -1,11 +1,11 @@
+pub(crate) mod collector;
 pub(crate) mod msg;
 pub(crate) mod reply;
 pub(crate) mod subcmd;
 pub(crate) mod subreply;
-pub(crate) mod collector;
 
-use bytes::Bytes;
 use super::Error;
+use bytes::Bytes;
 
 pub(crate) trait SubCmd {
     const SETUP: u16;
@@ -22,8 +22,8 @@ pub(crate) trait SubCmd {
     }
 }
 
-
 pub(crate) trait SubReply: Sized {
+    #[allow(dead_code)]
     const SETUP: u16;
 
     fn parse(parameter: Bytes, data: Bytes) -> Result<Self, Error>;

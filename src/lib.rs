@@ -11,7 +11,7 @@ use regex::Regex;
 
 use crate::netbios::NetBios;
 use crate::smb::info::{Cmd, Flags2, Info, Status};
-use crate::smb::{msg, reply, trans, trans2, Capabilities, DirInfo};
+use crate::smb::{msg, reply, trans, trans2, Capabilities, DirInfo, SMB_READ_MAX};
 use crate::utils::sanitize_path;
 use crate::win::{FileAttr, NTStatus, NotifyAction};
 
@@ -108,8 +108,48 @@ impl Cifs {
     }
 
     pub async fn read(&mut self, file: &Handle, offset: u64) -> Result<Bytes, Error> {
-        let reply: reply::Read = self.command(msg::Read::handle(file, offset)).await?;
+        self.read_at(file, offset, SMB_READ_MAX).await
+    }
+
+    pub async fn read_at(
+        &mut self,
+        file: &Handle,
+        offset: u64,
+        count: u16,
+    ) -> Result<Bytes, Error> {
+        if count == 0 {
+            return Ok(Bytes::new());
+        }
+
+        let reply: reply::Read = self.command(msg::Read::handle(file, offset, count)).await?;
         Ok(reply.data)
+    }
+
+    pub async fn read_range_at(
+        &mut self,
+        file: &Handle,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<Bytes>, Error> {
+        let mut chunks = Vec::new();
+        let mut read = 0;
+
+        while read < len {
+            let cursor = offset
+                .checked_add(read)
+                .ok_or_else(|| Error::InternalError("read offset overflow".to_owned()))?;
+            let chunk = self
+                .read_at(file, cursor, read_count_for(len - read))
+                .await?;
+            if chunk.is_empty() {
+                break;
+            }
+
+            read += chunk.len() as u64;
+            chunks.push(chunk);
+        }
+
+        Ok(chunks)
     }
 
     pub async fn download(&mut self, share: &Share, path: &str) -> Result<Vec<u8>, Error> {
@@ -117,7 +157,15 @@ impl Cifs {
 
         let mut data = Vec::new();
         while (data.len() as u64) < file.size {
-            let chunk = self.read(&file, data.len() as u64).await?;
+            let remaining = file.size - data.len() as u64;
+            let chunk = self
+                .read_at(&file, data.len() as u64, read_count_for(remaining))
+                .await?;
+            if chunk.is_empty() {
+                return Err(Error::InternalError(
+                    "server returned no data before EOF".to_owned(),
+                ));
+            }
             data.extend_from_slice(chunk.as_ref());
         }
 
@@ -414,6 +462,10 @@ impl Cifs {
     }
 }
 
+fn read_count_for(remaining: u64) -> u16 {
+    remaining.min(u64::from(SMB_READ_MAX)) as u16
+}
+
 /// Struct for holding the result of resolve_smb_uri
 pub struct CifsConfig<'a> {
     pub domain: Option<&'a str>,
@@ -448,7 +500,7 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 
         port: uri_match
             .name("port")
-            .map(|m| u16::from_str_radix(m.as_str(), 10))
+            .map(|m| m.as_str().parse::<u16>())
             .transpose()
             .map_err(|_| Error::InvalidUri)?,
 
@@ -462,7 +514,15 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_smb_uri;
+    use super::{read_count_for, resolve_smb_uri, SMB_READ_MAX};
+
+    #[test]
+    fn read_count_is_capped_to_smb_limit() {
+        assert_eq!(read_count_for(0), 0);
+        assert_eq!(read_count_for(1), 1);
+        assert_eq!(read_count_for(u64::from(SMB_READ_MAX)), SMB_READ_MAX);
+        assert_eq!(read_count_for(u64::from(SMB_READ_MAX) + 1), SMB_READ_MAX);
+    }
 
     #[test]
     fn test_uri() {

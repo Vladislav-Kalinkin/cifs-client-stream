@@ -1,8 +1,8 @@
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::utils;
 use super::buffer::Buffer;
 use super::Error;
+use crate::utils;
 
 enum PacketEntry {
     Binary(Vec<u8>),
@@ -17,7 +17,6 @@ impl PacketEntry {
         }
     }
 }
-
 
 pub struct Packet {
     entries: Vec<PacketEntry>,
@@ -37,7 +36,8 @@ impl Packet {
     }
 
     pub fn append_u32(&mut self, value: u32) {
-        self.entries.push(PacketEntry::Binary(Vec::from(value.to_le_bytes())));
+        self.entries
+            .push(PacketEntry::Binary(Vec::from(value.to_le_bytes())));
     }
 
     pub fn append_buffer(&mut self, data: &[u8]) {
@@ -78,9 +78,6 @@ impl Packet {
     }
 
     fn base_len(&self) -> usize {
-        self.entries
-            .iter()
-            .map(|e| e.len())
-            .sum()
+        self.entries.iter().map(|e| e.len()).sum()
     }
 }

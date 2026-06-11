@@ -1,6 +1,6 @@
-use bytes::{Bytes, Buf};
+use bytes::{Buf, Bytes};
 
-use crate::smb::{Error, DirInfo, trans2::SubReply};
+use crate::smb::{trans2::SubReply, DirInfo, Error};
 
 /// Reply to TRANS2_FIND_NEXT2, see 2.2.6.3.2
 pub struct FindNext2 {
@@ -58,6 +58,6 @@ impl SubReply for FindNext2 {
             return Err(Error::InvalidData);
         }
 
-        Ok( Self { end, info } )
+        Ok(Self { end, info })
     }
 }

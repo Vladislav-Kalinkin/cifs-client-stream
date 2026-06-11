@@ -62,13 +62,27 @@ pub struct ReadAheadStats {
     pub source_position: u64,
     pub file_size: u64,
     pub buffered: usize,
+    pub buffered_chunks: usize,
     pub read_ahead_capacity: usize,
+    pub chunk_size: u16,
     pub eof: bool,
 }
 
 impl ReadAheadStats {
     pub fn remaining(&self) -> u64 {
         self.file_size.saturating_sub(self.position)
+    }
+
+    pub fn buffer_free(&self) -> usize {
+        self.read_ahead_capacity.saturating_sub(self.buffered)
+    }
+
+    pub fn prefetched(&self) -> u64 {
+        self.source_position.saturating_sub(self.position)
+    }
+
+    pub fn is_buffering(&self) -> bool {
+        !self.eof && self.buffered < self.read_ahead_capacity
     }
 }
 
@@ -167,6 +181,11 @@ impl FileStream {
         if chunk.is_empty() {
             return Ok(None);
         }
+        if chunk.len() > usize::from(count) || chunk.len() as u64 > remaining {
+            return Err(Error::InternalError(
+                "server returned more data than requested".to_owned(),
+            ));
+        }
 
         self.position += chunk.len() as u64;
         Ok(Some(chunk))
@@ -223,8 +242,22 @@ impl ReadAhead {
         self.stream.position()
     }
 
+    pub fn options(&self) -> StreamOptions {
+        self.options
+    }
+
     pub fn buffered_len(&self) -> usize {
         self.buffered
+    }
+
+    pub fn buffered_chunks(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn buffer_free(&self) -> usize {
+        self.options
+            .read_ahead_capacity
+            .saturating_sub(self.buffered)
     }
 
     pub fn stats(&self) -> ReadAheadStats {
@@ -233,7 +266,9 @@ impl ReadAhead {
             source_position: self.source_position(),
             file_size: self.stream.size(),
             buffered: self.buffered,
+            buffered_chunks: self.buffered_chunks(),
             read_ahead_capacity: self.options.read_ahead_capacity,
+            chunk_size: self.options.chunk_size,
             eof: self.is_eof(),
         }
     }
@@ -335,7 +370,7 @@ impl ReadAhead {
             return Some(first);
         }
 
-        let capacity = max_len.min(first.len() + self.buffered);
+        let capacity = max_len.min(first.len().saturating_add(self.buffered));
         let mut out = BytesMut::with_capacity(capacity);
         out.extend_from_slice(&first);
 
@@ -911,6 +946,19 @@ mod tests {
     }
 
     #[test]
+    fn read_ahead_exposes_normalized_options() {
+        let buffer = ReadAhead::new(fake_stream(100), 10, u16::MAX);
+
+        assert_eq!(
+            buffer.options(),
+            StreamOptions {
+                read_ahead_capacity: 10,
+                chunk_size: SMB_READ_MAX,
+            }
+        );
+    }
+
+    #[test]
     fn seek_position_supports_common_origins() {
         assert_eq!(seek_position(100, 10, SeekFrom::Start(7)).unwrap(), 7);
         assert_eq!(seek_position(100, 10, SeekFrom::Current(5)).unwrap(), 15);
@@ -931,13 +979,19 @@ mod tests {
         buffer.push_chunk(Bytes::from_static(b"ef"));
 
         assert_eq!(buffer.buffered_len(), 6);
+        assert_eq!(buffer.buffered_chunks(), 2);
+        assert_eq!(buffer.buffer_free(), 4);
         assert_eq!(buffer.position(), 0);
         assert_eq!(buffer.pop_chunk().unwrap().as_ref(), b"abcd");
         assert_eq!(buffer.position(), 4);
         assert_eq!(buffer.buffered_len(), 2);
+        assert_eq!(buffer.buffered_chunks(), 1);
+        assert_eq!(buffer.buffer_free(), 8);
         assert_eq!(buffer.pop_chunk().unwrap().as_ref(), b"ef");
         assert_eq!(buffer.position(), 6);
         assert_eq!(buffer.buffered_len(), 0);
+        assert_eq!(buffer.buffered_chunks(), 0);
+        assert_eq!(buffer.buffer_free(), 10);
     }
 
     #[test]
@@ -1016,11 +1070,16 @@ mod tests {
                 source_position: 22,
                 file_size: 100,
                 buffered: 4,
+                buffered_chunks: 1,
                 read_ahead_capacity: 10,
+                chunk_size: 8,
                 eof: false,
             }
         );
         assert_eq!(buffer.stats().remaining(), 82);
+        assert_eq!(buffer.stats().buffer_free(), 6);
+        assert_eq!(buffer.stats().prefetched(), 4);
+        assert!(buffer.stats().is_buffering());
     }
 
     #[test]

@@ -76,6 +76,20 @@ pub struct DirectoryReader {
     end: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Folder,
+    Audio,
+    Video,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaEntry {
+    pub name: String,
+    pub size: u64,
+    pub kind: MediaKind,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DirectorySortKey {
     file: bool,
@@ -530,6 +544,36 @@ impl DirectoryReader {
         timeout: Duration,
     ) -> Result<Option<Vec<DirInfo>>, Error> {
         with_timeout(timeout, self.next_media(cifs)).await
+    }
+
+    pub async fn next_media_entries(
+        &mut self,
+        cifs: &mut Cifs,
+    ) -> Result<Option<Vec<MediaEntry>>, Error> {
+        Ok(self
+            .next_media(cifs)
+            .await?
+            .map(|entries| entries.into_iter().map(MediaEntry::from).collect()))
+    }
+
+    pub async fn next_media_entries_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        timeout: Duration,
+    ) -> Result<Option<Vec<MediaEntry>>, Error> {
+        with_timeout(timeout, self.next_media_entries(cifs)).await
+    }
+}
+
+impl From<DirInfo> for MediaEntry {
+    fn from(entry: DirInfo) -> Self {
+        let kind = media_kind(&entry);
+
+        Self {
+            name: entry.filename,
+            size: entry.filesize,
+            kind,
+        }
     }
 }
 
@@ -1086,6 +1130,22 @@ fn is_media_extension(extension: &str) -> bool {
     AUDIO_EXTENSIONS.contains(&extension.as_str()) || VIDEO_EXTENSIONS.contains(&extension.as_str())
 }
 
+fn media_kind(entry: &DirInfo) -> MediaKind {
+    if entry.attributes.contains(ExtFileAttr::DIRECTORY) {
+        return MediaKind::Folder;
+    }
+
+    match file_extension(&entry.filename) {
+        Some(extension) if is_audio_extension(extension) => MediaKind::Audio,
+        _ => MediaKind::Video,
+    }
+}
+
+fn is_audio_extension(extension: &str) -> bool {
+    let extension = extension.to_ascii_lowercase();
+    AUDIO_EXTENSIONS.contains(&extension.as_str())
+}
+
 fn is_subtitle_extension(extension: &str) -> bool {
     let extension = extension.to_ascii_lowercase();
     SUBTITLE_EXTENSIONS.contains(&extension.as_str())
@@ -1207,7 +1267,7 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 mod tests {
     use super::{
         is_media_entry, read_count_for, resolve_smb_uri, retain_media_entries, seek_position,
-        sort_dir_entries, ReadAhead, StreamOptions, SMB_READ_MAX,
+        sort_dir_entries, MediaEntry, MediaKind, ReadAhead, StreamOptions, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -1460,6 +1520,26 @@ mod tests {
 
         assert!(!is_media_entry(&hidden));
         assert!(!is_media_entry(&system));
+    }
+
+    #[test]
+    fn media_entry_maps_dir_info_to_ui_shape() {
+        assert_eq!(
+            MediaEntry::from(fake_dir_entry("Series", true)),
+            MediaEntry {
+                name: "Series".to_owned(),
+                size: 0,
+                kind: MediaKind::Folder,
+            }
+        );
+        assert_eq!(
+            MediaEntry::from(fake_dir_entry("Commentary.opus", false)).kind,
+            MediaKind::Audio
+        );
+        assert_eq!(
+            MediaEntry::from(fake_dir_entry("Episode.mkv", false)).kind,
+            MediaKind::Video
+        );
     }
 
     #[test]

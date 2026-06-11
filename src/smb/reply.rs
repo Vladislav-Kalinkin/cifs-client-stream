@@ -377,30 +377,6 @@ impl Reply for Read {
     }
 }
 
-/// Reply to SMB_COM_DELETE (0x06), see 2.2.4.7 in CIFS
-pub struct Delete;
-
-impl Reply for Delete {
-    const CMD: Cmd = Cmd::Delete;
-    const ANDX: bool = false;
-
-    fn create(_ctx: ReplyCtx) -> Result<Self, Error> {
-        Ok(Self)
-    }
-}
-
-/// Reply to SMB_COM_DELETE_DIRECTORY (0x01), see 2.2.4.2 in CIFS
-pub struct Rmdir;
-
-impl Reply for Rmdir {
-    const CMD: Cmd = Cmd::Rmdir;
-    const ANDX: bool = false;
-
-    fn create(_ctx: ReplyCtx) -> Result<Self, Error> {
-        Ok(Self)
-    }
-}
-
 /// Reply to SMB_COM_NT_TRANSACT, see 2.2.4.62.2
 pub struct Transact<T> {
     pub subcmd: T,

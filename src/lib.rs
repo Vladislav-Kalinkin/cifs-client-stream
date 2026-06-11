@@ -418,20 +418,6 @@ impl Cifs {
         Ok(data)
     }
 
-    pub async fn delete(&mut self, share: &Share, path: &str) -> Result<(), Error> {
-        let _: reply::Delete = self
-            .command(msg::Delete::file(share.tid, sanitize_path(path)))
-            .await?;
-        Ok(())
-    }
-
-    pub async fn rmdir(&mut self, share: &Share, path: &str) -> Result<(), Error> {
-        let _: reply::Rmdir = self
-            .command(msg::Rmdir::new(share.tid, sanitize_path(path)))
-            .await?;
-        Ok(())
-    }
-
     pub async fn notify(&mut self, handle: &Handle) -> Result<Vec<(String, NotifyAction)>, Error> {
         self.notify_about(handle, NotifyMode::all()).await
     }

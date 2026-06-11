@@ -97,6 +97,20 @@ pub struct MediaFolderSummary {
     pub audio_tracks: Vec<usize>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MediaPresentation {
+    Folder {
+        index: usize,
+    },
+    MovieFolder {
+        index: usize,
+        summary: MediaFolderSummary,
+    },
+    PlayableFile {
+        index: usize,
+    },
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DirectorySortKey {
     file: bool,
@@ -624,6 +638,30 @@ impl MediaFolderSummary {
     pub fn can_collapse_to_movie(&self) -> bool {
         self.main_video.is_some()
     }
+}
+
+impl MediaPresentation {
+    pub fn from_entry(
+        index: usize,
+        entry: &MediaEntry,
+        folder_summary: Option<MediaFolderSummary>,
+    ) -> Self {
+        match (entry.kind, folder_summary) {
+            (MediaKind::Folder, Some(summary)) if summary.can_collapse_to_movie() => {
+                Self::MovieFolder { index, summary }
+            }
+            (MediaKind::Folder, _) => Self::Folder { index },
+            (MediaKind::Audio | MediaKind::Video, _) => Self::PlayableFile { index },
+        }
+    }
+}
+
+pub fn media_presentations(entries: &[MediaEntry]) -> Vec<MediaPresentation> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| MediaPresentation::from_entry(index, entry, None))
+        .collect()
 }
 
 pub fn sort_dir_entries(entries: &mut [DirInfo]) {
@@ -1353,9 +1391,10 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_likely_extra_video, is_media_entry, main_video_index, read_count_for, resolve_smb_uri,
-        retain_media_entries, seek_position, sort_dir_entries, MediaEntry, MediaFolderSummary,
-        MediaKind, ReadAhead, StreamOptions, SMB_READ_MAX,
+        is_likely_extra_video, is_media_entry, main_video_index, media_presentations,
+        read_count_for, resolve_smb_uri, retain_media_entries, seek_position, sort_dir_entries,
+        MediaEntry, MediaFolderSummary, MediaKind, MediaPresentation, ReadAhead, StreamOptions,
+        SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -1685,6 +1724,39 @@ mod tests {
         assert_eq!(summary.main_video, None);
         assert!(summary.extras.is_empty());
         assert_eq!(summary.audio_tracks, vec![2]);
+    }
+
+    #[test]
+    fn media_presentations_map_entries_without_hidden_scans() {
+        let entries = vec![
+            fake_media_entry("Movies", 0, MediaKind::Folder),
+            fake_media_entry("Song.opus", 1_000, MediaKind::Audio),
+            fake_media_entry("Movie.mkv", 10_000, MediaKind::Video),
+        ];
+
+        assert_eq!(
+            media_presentations(&entries),
+            vec![
+                MediaPresentation::Folder { index: 0 },
+                MediaPresentation::PlayableFile { index: 1 },
+                MediaPresentation::PlayableFile { index: 2 },
+            ]
+        );
+    }
+
+    #[test]
+    fn media_presentation_can_collapse_folder_with_summary() {
+        let folder = fake_media_entry("Movie Folder", 0, MediaKind::Folder);
+        let summary = MediaFolderSummary {
+            main_video: Some(0),
+            extras: vec![1],
+            audio_tracks: vec![2],
+        };
+
+        assert_eq!(
+            MediaPresentation::from_entry(4, &folder, Some(summary.clone())),
+            MediaPresentation::MovieFolder { index: 4, summary }
+        );
     }
 
     #[test]

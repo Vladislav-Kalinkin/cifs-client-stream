@@ -90,6 +90,13 @@ pub struct MediaEntry {
     pub kind: MediaKind,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaFolderSummary {
+    pub main_video: Option<usize>,
+    pub extras: Vec<usize>,
+    pub audio_tracks: Vec<usize>,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DirectorySortKey {
     file: bool,
@@ -588,6 +595,34 @@ impl MediaEntry {
 
     pub fn is_video(&self) -> bool {
         self.kind == MediaKind::Video
+    }
+}
+
+impl MediaFolderSummary {
+    pub fn from_entries(entries: &[MediaEntry]) -> Self {
+        let main_video = main_video_index(entries);
+        let extras = entries
+            .iter()
+            .enumerate()
+            .filter(|(index, entry)| Some(*index) != main_video && is_likely_extra_video(entry))
+            .map(|(index, _)| index)
+            .collect();
+        let audio_tracks = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.is_audio())
+            .map(|(index, _)| index)
+            .collect();
+
+        Self {
+            main_video,
+            extras,
+            audio_tracks,
+        }
+    }
+
+    pub fn can_collapse_to_movie(&self) -> bool {
+        self.main_video.is_some()
     }
 }
 
@@ -1319,8 +1354,8 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 mod tests {
     use super::{
         is_likely_extra_video, is_media_entry, main_video_index, read_count_for, resolve_smb_uri,
-        retain_media_entries, seek_position, sort_dir_entries, MediaEntry, MediaKind, ReadAhead,
-        StreamOptions, SMB_READ_MAX,
+        retain_media_entries, seek_position, sort_dir_entries, MediaEntry, MediaFolderSummary,
+        MediaKind, ReadAhead, StreamOptions, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -1617,6 +1652,39 @@ mod tests {
         ];
 
         assert_eq!(main_video_index(&entries), Some(1));
+    }
+
+    #[test]
+    fn media_folder_summary_identifies_collapsible_movie_folder() {
+        let entries = vec![
+            fake_media_entry("Movie.mkv", 10_000, MediaKind::Video),
+            fake_media_entry("Movie Trailer.mkv", 2_000, MediaKind::Video),
+            fake_media_entry("Commentary.opus", 1_000, MediaKind::Audio),
+            fake_media_entry("Behind The Scenes.mkv", 3_000, MediaKind::Video),
+        ];
+
+        let summary = MediaFolderSummary::from_entries(&entries);
+
+        assert!(summary.can_collapse_to_movie());
+        assert_eq!(summary.main_video, Some(0));
+        assert_eq!(summary.extras, vec![1, 3]);
+        assert_eq!(summary.audio_tracks, vec![2]);
+    }
+
+    #[test]
+    fn media_folder_summary_keeps_non_movie_folder_open() {
+        let entries = vec![
+            fake_media_entry("Season 1", 0, MediaKind::Folder),
+            fake_media_entry("Season 2", 0, MediaKind::Folder),
+            fake_media_entry("Theme.opus", 1_000, MediaKind::Audio),
+        ];
+
+        let summary = MediaFolderSummary::from_entries(&entries);
+
+        assert!(!summary.can_collapse_to_movie());
+        assert_eq!(summary.main_video, None);
+        assert!(summary.extras.is_empty());
+        assert_eq!(summary.audio_tracks, vec![2]);
     }
 
     #[test]

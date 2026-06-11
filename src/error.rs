@@ -30,6 +30,7 @@ pub enum Error {
     ServerError(Status),
     Unsupported(String),
     InvalidConfig(String),
+    Timeout(String),
     InvalidUri,
 }
 
@@ -47,6 +48,7 @@ impl fmt::Display for Error {
             Error::ServerError(status) => write!(f, "server error: {}", status),
             Error::Unsupported(what) => write!(f, "unsupported feature: {}", what),
             Error::InvalidConfig(what) => write!(f, "invalid configuration: {}", what),
+            Error::Timeout(what) => write!(f, "timeout: {}", what),
             Error::InvalidUri => write!(f, "URI is invalid"),
         }
     }
@@ -63,6 +65,7 @@ impl Error {
             Error::ServerError(_) => ErrorKind::Server,
             Error::Unsupported(_) => ErrorKind::Unsupported,
             Error::InvalidConfig(_) => ErrorKind::Config,
+            Error::Timeout(_) => ErrorKind::Timeout,
             Error::InvalidUri => ErrorKind::InvalidInput,
         }
     }
@@ -169,12 +172,15 @@ mod tests {
         )));
         let protocol = Error::SMBError(smb::Error::InvalidHeader);
         let config = Error::InvalidConfig("bad option".to_owned());
+        let timeout = Error::Timeout("read".to_owned());
 
         assert_eq!(reset.kind(), ErrorKind::Network);
         assert!(reset.is_retryable());
         assert!(reset.is_connection_lost());
         assert!(!protocol.is_retryable());
         assert!(!config.is_retryable());
+        assert!(timeout.is_retryable());
+        assert!(timeout.is_timeout());
     }
 
     #[test]

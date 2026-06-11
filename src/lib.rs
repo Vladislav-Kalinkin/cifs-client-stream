@@ -6,7 +6,9 @@ mod utils;
 pub mod win;
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io::SeekFrom;
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use lazy_static::lazy_static;
@@ -190,6 +192,15 @@ impl FileStream {
         self.position += chunk.len() as u64;
         Ok(Some(chunk))
     }
+
+    pub async fn read_next_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        max_count: u16,
+        timeout: Duration,
+    ) -> Result<Option<Bytes>, Error> {
+        with_timeout(timeout, self.read_next(cifs, max_count)).await
+    }
 }
 
 impl ReadAhead {
@@ -285,6 +296,12 @@ impl ReadAhead {
         Ok(self.position)
     }
 
+    pub fn discard_buffer(&mut self) {
+        self.chunks.clear();
+        self.buffered = 0;
+        self.position = self.stream.position();
+    }
+
     pub async fn fill(&mut self, cifs: &mut Cifs) -> Result<(), Error> {
         while self.can_buffer_more() && !self.eof {
             let count = self.next_read_count();
@@ -297,9 +314,21 @@ impl ReadAhead {
         Ok(())
     }
 
+    pub async fn fill_timeout(&mut self, cifs: &mut Cifs, timeout: Duration) -> Result<(), Error> {
+        with_timeout(timeout, self.fill(cifs)).await
+    }
+
     pub async fn next(&mut self, cifs: &mut Cifs) -> Result<Option<Bytes>, Error> {
         self.fill(cifs).await?;
         Ok(self.pop_chunk())
+    }
+
+    pub async fn next_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        timeout: Duration,
+    ) -> Result<Option<Bytes>, Error> {
+        with_timeout(timeout, self.next(cifs)).await
     }
 
     pub async fn read(&mut self, cifs: &mut Cifs, max_len: usize) -> Result<Option<Bytes>, Error> {
@@ -309,6 +338,15 @@ impl ReadAhead {
 
         self.fill(cifs).await?;
         Ok(self.pop_bytes(max_len))
+    }
+
+    pub async fn read_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        max_len: usize,
+        timeout: Duration,
+    ) -> Result<Option<Bytes>, Error> {
+        with_timeout(timeout, self.read(cifs, max_len)).await
     }
 
     pub async fn read_block(
@@ -322,6 +360,15 @@ impl ReadAhead {
 
         self.fill(cifs).await?;
         Ok(self.pop_block(max_len))
+    }
+
+    pub async fn read_block_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        max_len: usize,
+        timeout: Duration,
+    ) -> Result<Option<Bytes>, Error> {
+        with_timeout(timeout, self.read_block(cifs, max_len)).await
     }
 
     fn can_buffer_more(&self) -> bool {
@@ -418,6 +465,15 @@ impl Cifs {
         Ok(cifs)
     }
 
+    pub async fn open_timeout(
+        host: &str,
+        port: Option<u16>,
+        maybe_auth: Option<Auth>,
+        timeout: Duration,
+    ) -> Result<Self, Error> {
+        with_timeout(timeout, Self::open(host, port, maybe_auth)).await
+    }
+
     pub async fn mount(&mut self, path: &str) -> Result<Share, Error> {
         self.mount_password(path, "").await
     }
@@ -508,6 +564,16 @@ impl Cifs {
         Ok(reply.data)
     }
 
+    pub async fn read_at_timeout(
+        &mut self,
+        file: &Handle,
+        offset: u64,
+        count: u16,
+        timeout: Duration,
+    ) -> Result<Bytes, Error> {
+        with_timeout(timeout, self.read_at(file, offset, count)).await
+    }
+
     pub async fn read_range_at(
         &mut self,
         file: &Handle,
@@ -533,6 +599,16 @@ impl Cifs {
         }
 
         Ok(chunks)
+    }
+
+    pub async fn read_range_at_timeout(
+        &mut self,
+        file: &Handle,
+        offset: u64,
+        len: u64,
+        timeout: Duration,
+    ) -> Result<Vec<Bytes>, Error> {
+        with_timeout(timeout, self.read_range_at(file, offset, len)).await
     }
 
     pub async fn download(&mut self, share: &Share, path: &str) -> Result<Vec<u8>, Error> {
@@ -851,6 +927,15 @@ fn seek_position(size: u64, current: u64, pos: SeekFrom) -> Result<u64, Error> {
     Ok(next as u64)
 }
 
+async fn with_timeout<T>(
+    timeout: Duration,
+    future: impl Future<Output = Result<T, Error>>,
+) -> Result<T, Error> {
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| Error::Timeout("operation timed out".to_owned()))?
+}
+
 /// Struct for holding the result of resolve_smb_uri
 pub struct CifsConfig<'a> {
     pub domain: Option<&'a str>,
@@ -1005,6 +1090,23 @@ mod tests {
         assert_eq!(buffer.source_position(), 25);
         assert_eq!(buffer.pop_chunk(), None);
         assert!(!buffer.is_eof());
+    }
+
+    #[test]
+    fn read_ahead_discard_buffer_drops_prefetched_data() {
+        let mut stream = fake_stream(100);
+        stream.seek(SeekFrom::Start(8)).unwrap();
+        let mut buffer = ReadAhead::new(stream, 10, 4);
+
+        buffer.push_chunk(Bytes::from_static(b"abcd"));
+        buffer.stream.seek(SeekFrom::Start(12)).unwrap();
+        buffer.discard_buffer();
+
+        assert_eq!(buffer.position(), 12);
+        assert_eq!(buffer.source_position(), 12);
+        assert_eq!(buffer.buffered_len(), 0);
+        assert_eq!(buffer.buffered_chunks(), 0);
+        assert_eq!(buffer.pop_chunk(), None);
     }
 
     #[test]

@@ -226,6 +226,15 @@ impl ReadAhead {
         Ok(self.pop_chunk())
     }
 
+    pub async fn read(&mut self, cifs: &mut Cifs, max_len: usize) -> Result<Option<Bytes>, Error> {
+        if max_len == 0 {
+            return Ok(None);
+        }
+
+        self.fill(cifs).await?;
+        Ok(self.pop_bytes(max_len))
+    }
+
     fn can_buffer_more(&self) -> bool {
         self.options.read_ahead_capacity > self.buffered && self.options.chunk_size > 0
     }
@@ -242,6 +251,23 @@ impl ReadAhead {
 
     fn pop_chunk(&mut self) -> Option<Bytes> {
         let chunk = self.chunks.pop_front()?;
+        self.buffered -= chunk.len();
+        Some(chunk)
+    }
+
+    fn pop_bytes(&mut self, max_len: usize) -> Option<Bytes> {
+        if max_len == 0 {
+            return None;
+        }
+
+        let mut chunk = self.chunks.pop_front()?;
+        if chunk.len() > max_len {
+            let out = chunk.split_to(max_len);
+            self.buffered -= out.len();
+            self.chunks.push_front(chunk);
+            return Some(out);
+        }
+
         self.buffered -= chunk.len();
         Some(chunk)
     }
@@ -852,6 +878,26 @@ mod tests {
         assert_eq!(buffer.next_read_count(), 8);
         buffer.push_chunk(Bytes::from_static(b"abcdef"));
         assert_eq!(buffer.next_read_count(), 4);
+    }
+
+    #[test]
+    fn read_ahead_pop_bytes_splits_front_chunk() {
+        let mut buffer = ReadAhead::new(fake_stream(100), 10, 8);
+        buffer.push_chunk(Bytes::from_static(b"abcdef"));
+
+        assert_eq!(buffer.pop_bytes(2).unwrap().as_ref(), b"ab");
+        assert_eq!(buffer.buffered_len(), 4);
+        assert_eq!(buffer.pop_bytes(10).unwrap().as_ref(), b"cdef");
+        assert_eq!(buffer.buffered_len(), 0);
+    }
+
+    #[test]
+    fn read_ahead_pop_bytes_rejects_zero_len() {
+        let mut buffer = ReadAhead::new(fake_stream(100), 10, 8);
+        buffer.push_chunk(Bytes::from_static(b"abcdef"));
+
+        assert_eq!(buffer.pop_bytes(0), None);
+        assert_eq!(buffer.buffered_len(), 6);
     }
 
     #[test]

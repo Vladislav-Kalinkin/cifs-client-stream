@@ -49,10 +49,21 @@ pub struct FileStream {
 #[derive(Debug)]
 pub struct ReadAhead {
     stream: FileStream,
+    position: u64,
     chunks: VecDeque<Bytes>,
     buffered: usize,
     options: StreamOptions,
     eof: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadAheadStats {
+    pub position: u64,
+    pub source_position: u64,
+    pub file_size: u64,
+    pub buffered: usize,
+    pub read_ahead_capacity: usize,
+    pub eof: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +169,7 @@ impl FileStream {
 
 impl ReadAhead {
     pub fn new(stream: FileStream, capacity: usize, chunk_size: u16) -> Self {
+        let position = stream.position();
         let options = StreamOptions {
             read_ahead_capacity: capacity,
             chunk_size,
@@ -166,6 +178,7 @@ impl ReadAhead {
 
         Self {
             stream,
+            position,
             chunks: VecDeque::new(),
             buffered: 0,
             options,
@@ -175,10 +188,12 @@ impl ReadAhead {
 
     pub fn with_options(stream: FileStream, options: StreamOptions) -> Result<Self, Error> {
         options.validate()?;
+        let position = stream.position();
         let options = options.normalized();
 
         Ok(Self {
             stream,
+            position,
             chunks: VecDeque::new(),
             buffered: 0,
             options,
@@ -194,8 +209,27 @@ impl ReadAhead {
         self.stream
     }
 
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+
+    pub fn source_position(&self) -> u64 {
+        self.stream.position()
+    }
+
     pub fn buffered_len(&self) -> usize {
         self.buffered
+    }
+
+    pub fn stats(&self) -> ReadAheadStats {
+        ReadAheadStats {
+            position: self.position,
+            source_position: self.source_position(),
+            file_size: self.stream.size(),
+            buffered: self.buffered,
+            read_ahead_capacity: self.options.read_ahead_capacity,
+            eof: self.is_eof(),
+        }
     }
 
     pub fn is_eof(&self) -> bool {
@@ -206,7 +240,8 @@ impl ReadAhead {
         self.chunks.clear();
         self.buffered = 0;
         self.eof = false;
-        self.stream.seek(pos)
+        self.position = self.stream.seek(pos)?;
+        Ok(self.position)
     }
 
     pub async fn fill(&mut self, cifs: &mut Cifs) -> Result<(), Error> {
@@ -252,6 +287,7 @@ impl ReadAhead {
     fn pop_chunk(&mut self) -> Option<Bytes> {
         let chunk = self.chunks.pop_front()?;
         self.buffered -= chunk.len();
+        self.position += chunk.len() as u64;
         Some(chunk)
     }
 
@@ -264,11 +300,13 @@ impl ReadAhead {
         if chunk.len() > max_len {
             let out = chunk.split_to(max_len);
             self.buffered -= out.len();
+            self.position += out.len() as u64;
             self.chunks.push_front(chunk);
             return Some(out);
         }
 
         self.buffered -= chunk.len();
+        self.position += chunk.len() as u64;
         Some(chunk)
     }
 }
@@ -854,9 +892,12 @@ mod tests {
         buffer.push_chunk(Bytes::from_static(b"ef"));
 
         assert_eq!(buffer.buffered_len(), 6);
+        assert_eq!(buffer.position(), 0);
         assert_eq!(buffer.pop_chunk().unwrap().as_ref(), b"abcd");
+        assert_eq!(buffer.position(), 4);
         assert_eq!(buffer.buffered_len(), 2);
         assert_eq!(buffer.pop_chunk().unwrap().as_ref(), b"ef");
+        assert_eq!(buffer.position(), 6);
         assert_eq!(buffer.buffered_len(), 0);
     }
 
@@ -867,6 +908,8 @@ mod tests {
 
         assert_eq!(buffer.seek(SeekFrom::Start(25)).unwrap(), 25);
         assert_eq!(buffer.buffered_len(), 0);
+        assert_eq!(buffer.position(), 25);
+        assert_eq!(buffer.source_position(), 25);
         assert_eq!(buffer.pop_chunk(), None);
         assert!(!buffer.is_eof());
     }
@@ -887,8 +930,10 @@ mod tests {
 
         assert_eq!(buffer.pop_bytes(2).unwrap().as_ref(), b"ab");
         assert_eq!(buffer.buffered_len(), 4);
+        assert_eq!(buffer.position(), 2);
         assert_eq!(buffer.pop_bytes(10).unwrap().as_ref(), b"cdef");
         assert_eq!(buffer.buffered_len(), 0);
+        assert_eq!(buffer.position(), 6);
     }
 
     #[test]
@@ -898,6 +943,29 @@ mod tests {
 
         assert_eq!(buffer.pop_bytes(0), None);
         assert_eq!(buffer.buffered_len(), 6);
+    }
+
+    #[test]
+    fn read_ahead_stats_report_playback_and_source_positions() {
+        let mut stream = fake_stream(100);
+        stream.seek(SeekFrom::Start(16)).unwrap();
+        let mut buffer = ReadAhead::new(stream, 10, 8);
+
+        buffer.push_chunk(Bytes::from_static(b"abcdef"));
+        buffer.stream.seek(SeekFrom::Start(22)).unwrap();
+        assert_eq!(buffer.pop_bytes(2).unwrap().as_ref(), b"ab");
+
+        assert_eq!(
+            buffer.stats(),
+            super::ReadAheadStats {
+                position: 18,
+                source_position: 22,
+                file_size: 100,
+                buffered: 4,
+                read_ahead_capacity: 10,
+                eof: false,
+            }
+        );
     }
 
     #[test]

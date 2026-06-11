@@ -577,6 +577,20 @@ impl From<DirInfo> for MediaEntry {
     }
 }
 
+impl MediaEntry {
+    pub fn is_folder(&self) -> bool {
+        self.kind == MediaKind::Folder
+    }
+
+    pub fn is_audio(&self) -> bool {
+        self.kind == MediaKind::Audio
+    }
+
+    pub fn is_video(&self) -> bool {
+        self.kind == MediaKind::Video
+    }
+}
+
 pub fn sort_dir_entries(entries: &mut [DirInfo]) {
     entries.sort_by_cached_key(directory_sort_key);
 }
@@ -598,6 +612,26 @@ pub fn is_media_entry(entry: &DirInfo) -> bool {
 
 pub fn retain_media_entries(entries: &mut Vec<DirInfo>) {
     entries.retain(is_media_entry);
+}
+
+pub fn main_video_index(entries: &[MediaEntry]) -> Option<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.is_video() && !is_likely_extra_video(entry))
+        .max_by_key(|(_, entry)| entry.size)
+        .or_else(|| {
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.is_video())
+                .max_by_key(|(_, entry)| entry.size)
+        })
+        .map(|(index, _)| index)
+}
+
+pub fn is_likely_extra_video(entry: &MediaEntry) -> bool {
+    entry.is_video() && is_likely_extra_name(&entry.name)
 }
 
 impl Cifs {
@@ -1146,6 +1180,24 @@ fn is_audio_extension(extension: &str) -> bool {
     AUDIO_EXTENSIONS.contains(&extension.as_str())
 }
 
+fn is_likely_extra_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "behind",
+        "deleted",
+        "extra",
+        "extras",
+        "featurette",
+        "interview",
+        "sample",
+        "scene",
+        "teaser",
+        "trailer",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
+}
+
 fn is_subtitle_extension(extension: &str) -> bool {
     let extension = extension.to_ascii_lowercase();
     SUBTITLE_EXTENSIONS.contains(&extension.as_str())
@@ -1266,8 +1318,9 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_media_entry, read_count_for, resolve_smb_uri, retain_media_entries, seek_position,
-        sort_dir_entries, MediaEntry, MediaKind, ReadAhead, StreamOptions, SMB_READ_MAX,
+        is_likely_extra_video, is_media_entry, main_video_index, read_count_for, resolve_smb_uri,
+        retain_media_entries, seek_position, sort_dir_entries, MediaEntry, MediaKind, ReadAhead,
+        StreamOptions, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -1543,6 +1596,30 @@ mod tests {
     }
 
     #[test]
+    fn main_video_index_prefers_largest_non_extra_video() {
+        let entries = vec![
+            fake_media_entry("Movie Trailer.mkv", 4_000, MediaKind::Video),
+            fake_media_entry("Movie.mkv", 10_000, MediaKind::Video),
+            fake_media_entry("Sample.mkv", 12_000, MediaKind::Video),
+            fake_media_entry("Commentary.opus", 1_000, MediaKind::Audio),
+        ];
+
+        assert!(is_likely_extra_video(&entries[0]));
+        assert!(is_likely_extra_video(&entries[2]));
+        assert_eq!(main_video_index(&entries), Some(1));
+    }
+
+    #[test]
+    fn main_video_index_falls_back_to_largest_video() {
+        let entries = vec![
+            fake_media_entry("Trailer 1.mkv", 4_000, MediaKind::Video),
+            fake_media_entry("Trailer 2.mkv", 8_000, MediaKind::Video),
+        ];
+
+        assert_eq!(main_video_index(&entries), Some(1));
+    }
+
+    #[test]
     fn test_uri() {
         let uri = "smb://localhost/myshare/this/is/a/path";
         let config = resolve_smb_uri(uri).unwrap();
@@ -1657,6 +1734,14 @@ mod tests {
             filename: filename.to_owned(),
             filesize: 0,
             attributes,
+        }
+    }
+
+    fn fake_media_entry(name: &str, size: u64, kind: MediaKind) -> MediaEntry {
+        MediaEntry {
+            name: name.to_owned(),
+            size,
+            kind,
         }
     }
 

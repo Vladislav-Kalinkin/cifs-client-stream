@@ -15,6 +15,7 @@ pub enum Error {
     TooManyReplies(usize),
     ServerError(Status),
     Unsupported(String),
+    InvalidConfig(String),
     InvalidUri,
 }
 
@@ -31,6 +32,7 @@ impl fmt::Display for Error {
             Error::TooManyReplies(num) => write!(f, "we expect one reply but got {}", num),
             Error::ServerError(status) => write!(f, "server error: {}", status),
             Error::Unsupported(what) => write!(f, "unsupported feature: {}", what),
+            Error::InvalidConfig(what) => write!(f, "invalid configuration: {}", what),
             Error::InvalidUri => write!(f, "URI is invalid"),
         }
     }

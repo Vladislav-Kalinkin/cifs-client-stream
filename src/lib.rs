@@ -18,6 +18,9 @@ use crate::smb::{msg, reply, trans, trans2, Capabilities, DirInfo, SMB_READ_MAX}
 use crate::utils::sanitize_path;
 use crate::win::{FileAttr, NTStatus, NotifyAction};
 
+const DEFAULT_READ_AHEAD_CAPACITY: usize = 8 * 1024 * 1024;
+const DEFAULT_STREAM_CHUNK_SIZE: u16 = SMB_READ_MAX;
+
 pub use crate::smb::reply::{Handle, Share};
 pub use error::Error;
 pub use netbios::Error as NetbiosError;
@@ -48,9 +51,55 @@ pub struct ReadAhead {
     stream: FileStream,
     chunks: VecDeque<Bytes>,
     buffered: usize,
-    capacity: usize,
-    chunk_size: u16,
+    options: StreamOptions,
     eof: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamOptions {
+    pub read_ahead_capacity: usize,
+    pub chunk_size: u16,
+}
+
+impl Default for StreamOptions {
+    fn default() -> Self {
+        Self {
+            read_ahead_capacity: DEFAULT_READ_AHEAD_CAPACITY,
+            chunk_size: DEFAULT_STREAM_CHUNK_SIZE,
+        }
+    }
+}
+
+impl StreamOptions {
+    pub fn new(read_ahead_capacity: usize, chunk_size: u16) -> Result<Self, Error> {
+        let options = Self {
+            read_ahead_capacity,
+            chunk_size,
+        };
+        options.validate()?;
+        Ok(options)
+    }
+
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.read_ahead_capacity == 0 {
+            return Err(Error::InvalidConfig(
+                "read-ahead capacity must be greater than zero".to_owned(),
+            ));
+        }
+        if self.chunk_size == 0 {
+            return Err(Error::InvalidConfig(
+                "stream chunk size must be greater than zero".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn normalized(self) -> Self {
+        Self {
+            read_ahead_capacity: self.read_ahead_capacity,
+            chunk_size: self.chunk_size.min(SMB_READ_MAX),
+        }
+    }
 }
 
 impl FileStream {
@@ -109,14 +158,32 @@ impl FileStream {
 
 impl ReadAhead {
     pub fn new(stream: FileStream, capacity: usize, chunk_size: u16) -> Self {
+        let options = StreamOptions {
+            read_ahead_capacity: capacity,
+            chunk_size,
+        }
+        .normalized();
+
         Self {
             stream,
             chunks: VecDeque::new(),
             buffered: 0,
-            capacity,
-            chunk_size,
+            options,
             eof: false,
         }
+    }
+
+    pub fn with_options(stream: FileStream, options: StreamOptions) -> Result<Self, Error> {
+        options.validate()?;
+        let options = options.normalized();
+
+        Ok(Self {
+            stream,
+            chunks: VecDeque::new(),
+            buffered: 0,
+            options,
+            eof: false,
+        })
     }
 
     pub fn stream(&self) -> &FileStream {
@@ -160,12 +227,12 @@ impl ReadAhead {
     }
 
     fn can_buffer_more(&self) -> bool {
-        self.capacity > self.buffered && self.chunk_size > 0
+        self.options.read_ahead_capacity > self.buffered && self.options.chunk_size > 0
     }
 
     fn next_read_count(&self) -> u16 {
-        let free = self.capacity - self.buffered;
-        read_count_for(free.min(usize::from(self.chunk_size)) as u64)
+        let free = self.options.read_ahead_capacity - self.buffered;
+        read_count_for(free.min(usize::from(self.options.chunk_size)) as u64)
     }
 
     fn push_chunk(&mut self, chunk: Bytes) {
@@ -250,11 +317,17 @@ impl Cifs {
         capacity: usize,
         chunk_size: u16,
     ) -> Result<ReadAhead, Error> {
-        Ok(ReadAhead::new(
-            self.open_stream(share, path).await?,
-            capacity,
-            chunk_size,
-        ))
+        self.open_read_ahead_with_options(share, path, StreamOptions::new(capacity, chunk_size)?)
+            .await
+    }
+
+    pub async fn open_read_ahead_with_options(
+        &mut self,
+        share: &Share,
+        path: &str,
+        options: StreamOptions,
+    ) -> Result<ReadAhead, Error> {
+        ReadAhead::with_options(self.open_stream(share, path).await?, options)
     }
 
     pub async fn opendir(&mut self, share: &Share, path: &str) -> Result<Handle, Error> {
@@ -702,7 +775,9 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_count_for, resolve_smb_uri, seek_position, ReadAhead, SMB_READ_MAX};
+    use super::{
+        read_count_for, resolve_smb_uri, seek_position, ReadAhead, StreamOptions, SMB_READ_MAX,
+    };
     use bytes::Bytes;
     use std::io::SeekFrom;
 
@@ -712,6 +787,38 @@ mod tests {
         assert_eq!(read_count_for(1), 1);
         assert_eq!(read_count_for(u64::from(SMB_READ_MAX)), SMB_READ_MAX);
         assert_eq!(read_count_for(u64::from(SMB_READ_MAX) + 1), SMB_READ_MAX);
+    }
+
+    #[test]
+    fn stream_options_have_streaming_defaults() {
+        let options = StreamOptions::default();
+
+        assert_eq!(
+            options.read_ahead_capacity,
+            super::DEFAULT_READ_AHEAD_CAPACITY
+        );
+        assert_eq!(options.chunk_size, SMB_READ_MAX);
+        assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn stream_options_reject_zero_values() {
+        assert!(StreamOptions::new(0, 1).is_err());
+        assert!(StreamOptions::new(1, 0).is_err());
+    }
+
+    #[test]
+    fn stream_options_cap_chunk_size_to_smb_limit() {
+        let buffer = ReadAhead::with_options(
+            fake_stream(100),
+            StreamOptions {
+                read_ahead_capacity: usize::from(SMB_READ_MAX) + 10,
+                chunk_size: u16::MAX,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(buffer.next_read_count(), SMB_READ_MAX);
     }
 
     #[test]

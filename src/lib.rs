@@ -66,6 +66,12 @@ pub struct ReadAheadStats {
     pub eof: bool,
 }
 
+impl ReadAheadStats {
+    pub fn remaining(&self) -> u64 {
+        self.file_size.saturating_sub(self.position)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamOptions {
     pub read_ahead_capacity: usize,
@@ -270,6 +276,19 @@ impl ReadAhead {
         Ok(self.pop_bytes(max_len))
     }
 
+    pub async fn read_block(
+        &mut self,
+        cifs: &mut Cifs,
+        max_len: usize,
+    ) -> Result<Option<Bytes>, Error> {
+        if max_len == 0 {
+            return Ok(None);
+        }
+
+        self.fill(cifs).await?;
+        Ok(self.pop_block(max_len))
+    }
+
     fn can_buffer_more(&self) -> bool {
         self.options.read_ahead_capacity > self.buffered && self.options.chunk_size > 0
     }
@@ -308,6 +327,26 @@ impl ReadAhead {
         self.buffered -= chunk.len();
         self.position += chunk.len() as u64;
         Some(chunk)
+    }
+
+    fn pop_block(&mut self, max_len: usize) -> Option<Bytes> {
+        let first = self.pop_bytes(max_len)?;
+        if first.len() == max_len || self.chunks.is_empty() {
+            return Some(first);
+        }
+
+        let capacity = max_len.min(first.len() + self.buffered);
+        let mut out = BytesMut::with_capacity(capacity);
+        out.extend_from_slice(&first);
+
+        while out.len() < max_len {
+            let Some(chunk) = self.pop_bytes(max_len - out.len()) else {
+                break;
+            };
+            out.extend_from_slice(&chunk);
+        }
+
+        Some(out.freeze())
     }
 }
 
@@ -946,6 +985,21 @@ mod tests {
     }
 
     #[test]
+    fn read_ahead_pop_block_combines_buffered_chunks() {
+        let mut buffer = ReadAhead::new(fake_stream(100), 10, 8);
+        buffer.push_chunk(Bytes::from_static(b"ab"));
+        buffer.push_chunk(Bytes::from_static(b"cdef"));
+        buffer.push_chunk(Bytes::from_static(b"gh"));
+
+        assert_eq!(buffer.pop_block(5).unwrap().as_ref(), b"abcde");
+        assert_eq!(buffer.position(), 5);
+        assert_eq!(buffer.buffered_len(), 3);
+        assert_eq!(buffer.pop_block(10).unwrap().as_ref(), b"fgh");
+        assert_eq!(buffer.position(), 8);
+        assert_eq!(buffer.buffered_len(), 0);
+    }
+
+    #[test]
     fn read_ahead_stats_report_playback_and_source_positions() {
         let mut stream = fake_stream(100);
         stream.seek(SeekFrom::Start(16)).unwrap();
@@ -966,6 +1020,7 @@ mod tests {
                 eof: false,
             }
         );
+        assert_eq!(buffer.stats().remaining(), 82);
     }
 
     #[test]

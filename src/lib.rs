@@ -5,6 +5,8 @@ mod smb;
 mod utils;
 pub mod win;
 
+use std::io::SeekFrom;
+
 use bytes::{Bytes, BytesMut};
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -32,6 +34,66 @@ pub struct Cifs {
     use_unicode: bool,
     uid: u16,
     mid: u16,
+}
+
+#[derive(Debug)]
+pub struct FileStream {
+    handle: Handle,
+    position: u64,
+}
+
+impl FileStream {
+    pub fn new(handle: Handle) -> Self {
+        Self {
+            handle,
+            position: 0,
+        }
+    }
+
+    pub fn handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    pub fn into_handle(self) -> Handle {
+        self.handle
+    }
+
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+
+    pub fn size(&self) -> u64 {
+        self.handle.size
+    }
+
+    pub fn is_eof(&self) -> bool {
+        self.position >= self.size()
+    }
+
+    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+        self.position = seek_position(self.size(), self.position, pos)?;
+        Ok(self.position)
+    }
+
+    pub async fn read_next(
+        &mut self,
+        cifs: &mut Cifs,
+        max_count: u16,
+    ) -> Result<Option<Bytes>, Error> {
+        if self.is_eof() || max_count == 0 {
+            return Ok(None);
+        }
+
+        let remaining = self.size() - self.position;
+        let count = read_count_for(remaining.min(u64::from(max_count)));
+        let chunk = cifs.read_at(&self.handle, self.position, count).await?;
+        if chunk.is_empty() {
+            return Ok(None);
+        }
+
+        self.position += chunk.len() as u64;
+        Ok(Some(chunk))
+    }
 }
 
 impl Cifs {
@@ -93,6 +155,10 @@ impl Cifs {
             .await
     }
 
+    pub async fn open_stream(&mut self, share: &Share, path: &str) -> Result<FileStream, Error> {
+        Ok(FileStream::new(self.openfile(share, path).await?))
+    }
+
     pub async fn opendir(&mut self, share: &Share, path: &str) -> Result<Handle, Error> {
         self.command(msg::Open::dir(share.tid, sanitize_path(path)))
             .await
@@ -105,6 +171,10 @@ impl Cifs {
 
     pub async fn close(&mut self, file: Handle) -> Result<(), Error> {
         self.close_ref(&file).await
+    }
+
+    pub async fn close_stream(&mut self, stream: FileStream) -> Result<(), Error> {
+        self.close(stream.into_handle()).await
     }
 
     pub async fn read(&mut self, file: &Handle, offset: u64) -> Result<Bytes, Error> {
@@ -466,6 +536,22 @@ fn read_count_for(remaining: u64) -> u16 {
     remaining.min(u64::from(SMB_READ_MAX)) as u16
 }
 
+fn seek_position(size: u64, current: u64, pos: SeekFrom) -> Result<u64, Error> {
+    let next = match pos {
+        SeekFrom::Start(offset) => i128::from(offset),
+        SeekFrom::End(offset) => i128::from(size) + i128::from(offset),
+        SeekFrom::Current(offset) => i128::from(current) + i128::from(offset),
+    };
+
+    if next < 0 || next > i128::from(u64::MAX) {
+        return Err(Error::InternalError(
+            "seek position is out of range".to_owned(),
+        ));
+    }
+
+    Ok(next as u64)
+}
+
 /// Struct for holding the result of resolve_smb_uri
 pub struct CifsConfig<'a> {
     pub domain: Option<&'a str>,
@@ -514,7 +600,8 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_count_for, resolve_smb_uri, SMB_READ_MAX};
+    use super::{read_count_for, resolve_smb_uri, seek_position, SMB_READ_MAX};
+    use std::io::SeekFrom;
 
     #[test]
     fn read_count_is_capped_to_smb_limit() {
@@ -522,6 +609,19 @@ mod tests {
         assert_eq!(read_count_for(1), 1);
         assert_eq!(read_count_for(u64::from(SMB_READ_MAX)), SMB_READ_MAX);
         assert_eq!(read_count_for(u64::from(SMB_READ_MAX) + 1), SMB_READ_MAX);
+    }
+
+    #[test]
+    fn seek_position_supports_common_origins() {
+        assert_eq!(seek_position(100, 10, SeekFrom::Start(7)).unwrap(), 7);
+        assert_eq!(seek_position(100, 10, SeekFrom::Current(5)).unwrap(), 15);
+        assert_eq!(seek_position(100, 10, SeekFrom::End(-20)).unwrap(), 80);
+    }
+
+    #[test]
+    fn seek_position_rejects_negative_offsets() {
+        assert!(seek_position(100, 10, SeekFrom::Current(-11)).is_err());
+        assert!(seek_position(100, 10, SeekFrom::End(-101)).is_err());
     }
 
     #[test]

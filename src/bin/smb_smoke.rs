@@ -3,9 +3,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use cifs_client::{
-    media_presentations, media_presentations_with_summaries, resolve_smb_uri, Auth, Cifs, Error,
-    MediaEntry, MediaFolderSummary, MediaPresentation, Share, SmbMediaStreamOptions, StreamOptions,
-    StreamingWorkerOptions, StreamingWorkerStats,
+    media_presentations, media_presentations_with_summaries, resolve_smb_uri, Auth, Cifs,
+    CifsIoStats, Error, MediaEntry, MediaFolderSummary, MediaPresentation, Share,
+    SmbMediaStreamOptions, StreamOptions, StreamingWorkerOptions, StreamingWorkerStats,
 };
 
 const DEFAULT_READ_BYTES: usize = 256 * 1024;
@@ -201,6 +201,7 @@ async fn run() -> Result<(), Error> {
                 media_stream_options.worker_options.high_watermark
             );
 
+        cifs.reset_io_stats();
         let mut media_stream = cifs
             .open_media_stream_with_options(&share, &path, media_stream_options)
             .await?;
@@ -236,6 +237,9 @@ async fn run() -> Result<(), Error> {
                 after.buffered,
                 after.buffered_chunks
             );
+
+            print_io_stats("initial source reads", cifs.io_stats());
+            cifs.reset_io_stats();
         }
 
         let started = Instant::now();
@@ -305,6 +309,7 @@ async fn run() -> Result<(), Error> {
         let elapsed = started.elapsed();
         measurements.print_summary(&path, elapsed);
         prefill_measurements.print_summary();
+        print_io_stats("stream source reads", cifs.io_stats());
 
         if worker_initial_buffer > 0 {
             let total_with_initial = elapsed + initial_prefill_elapsed;
@@ -542,6 +547,23 @@ fn mib_per_second(bytes: usize, elapsed: Duration) -> f64 {
     } else {
         (bytes as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
     }
+}
+
+fn print_io_stats(label: &str, stats: CifsIoStats) {
+    if stats.read_at_calls == 0 {
+        return;
+    }
+
+    println!(
+        "{}: calls={} bytes={} avg_size={} avg_latency={:?} source_time={:?} source_rate={:.2} MiB/s",
+        label,
+        stats.read_at_calls,
+        stats.read_at_bytes,
+        stats.average_read_size(),
+        stats.average_read_latency(),
+        stats.read_at_elapsed,
+        stats.read_throughput_mib_per_second()
+    );
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {

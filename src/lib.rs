@@ -5,10 +5,10 @@ mod smb;
 mod utils;
 pub mod win;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io::SeekFrom;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use lazy_static::lazy_static;
@@ -42,6 +42,12 @@ pub use ntlm::Error as NtlmError;
 pub use smb::Error as SmbError;
 
 #[derive(Debug)]
+struct PendingReply {
+    info: Info,
+    body: Bytes,
+}
+
+#[derive(Debug)]
 pub struct Cifs {
     netbios: NetBios,
     auth: Auth,
@@ -50,6 +56,48 @@ pub struct Cifs {
     use_unicode: bool,
     uid: u16,
     mid: u16,
+    io_stats: CifsIoStats,
+    pending_replies: HashMap<u16, PendingReply>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CifsIoStats {
+    pub read_at_calls: u64,
+    pub read_at_bytes: u64,
+    pub read_at_elapsed: Duration,
+}
+
+impl CifsIoStats {
+    pub fn average_read_size(&self) -> u64 {
+        self.read_at_bytes
+            .checked_div(self.read_at_calls)
+            .unwrap_or(0)
+    }
+
+    pub fn average_read_latency(&self) -> Duration {
+        let Some(calls) = u32::try_from(self.read_at_calls)
+            .ok()
+            .filter(|calls| *calls > 0)
+        else {
+            return Duration::ZERO;
+        };
+
+        self.read_at_elapsed / calls
+    }
+
+    pub fn read_throughput_mib_per_second(&self) -> f64 {
+        if self.read_at_elapsed.is_zero() {
+            0.0
+        } else {
+            (self.read_at_bytes as f64 / (1024.0 * 1024.0)) / self.read_at_elapsed.as_secs_f64()
+        }
+    }
+
+    fn record_read(&mut self, bytes: usize, elapsed: Duration) {
+        self.read_at_calls += 1;
+        self.read_at_bytes += bytes as u64;
+        self.read_at_elapsed += elapsed;
+    }
 }
 
 #[derive(Debug)]
@@ -1046,6 +1094,8 @@ impl Cifs {
             use_unicode: true,
             uid: 0,
             mid: 0,
+            io_stats: CifsIoStats::default(),
+            pending_replies: HashMap::new(),
         };
 
         cifs.setup_connection().await?;
@@ -1060,6 +1110,14 @@ impl Cifs {
         timeout: Duration,
     ) -> Result<Self, Error> {
         with_timeout(timeout, Self::open(host, port, maybe_auth)).await
+    }
+
+    pub fn io_stats(&self) -> CifsIoStats {
+        self.io_stats
+    }
+
+    pub fn reset_io_stats(&mut self) {
+        self.io_stats = CifsIoStats::default();
     }
 
     pub async fn mount(&mut self, path: &str) -> Result<Share, Error> {
@@ -1132,7 +1190,12 @@ impl Cifs {
             return Ok(Bytes::new());
         }
 
+        let started = Instant::now();
         let reply: reply::Read = self.command(msg::Read::handle(file, offset, count)).await?;
+        let elapsed = started.elapsed();
+
+        self.io_stats.record_read(reply.data.len(), elapsed);
+
         Ok(reply.data)
     }
 
@@ -1310,26 +1373,20 @@ impl Cifs {
         Ok(mid)
     }
 
-    /// receives a reply of type R and given mid.
-    ///
-    /// Note: for simplification this function will drop any response that
-    /// does not match the given mid.
-    async fn recv<R: reply::Reply>(&mut self, mid: u16) -> Result<R, Error> {
-        // wait for a frame with the correct mid
-        let (info, body) = loop {
-            let mut frame = self.netbios.recv_message().await?;
-            let info = Info::parse(&mut frame)?;
-            if info.mid == mid {
-                break (info, frame);
-            }
-        };
+    async fn recv_frame(&mut self) -> Result<PendingReply, Error> {
+        let mut frame = self.netbios.recv_message().await?;
+        let info = Info::parse(&mut frame)?;
 
-        // check command identifier
+        Ok(PendingReply { info, body: frame })
+    }
+
+    fn parse_reply<R: reply::Reply>(pending: PendingReply) -> Result<R, Error> {
+        let PendingReply { info, body } = pending;
+
         if info.cmd != R::CMD {
             return Err(Error::UnexpectedReply(R::CMD, info.cmd));
         }
 
-        // check status
         if let Status::Known(status) = info.status {
             match status {
                 NTStatus::SUCCESS => (),
@@ -1341,8 +1398,28 @@ impl Cifs {
             return Err(Error::ServerError(info.status));
         }
 
-        // finally parse the response body into our desired result
         R::parse(info, body).map_err(|e| e.into())
+    }
+
+    async fn recv<R: reply::Reply>(&mut self, mid: u16) -> Result<R, Error> {
+        if let Some(pending) = self.pending_replies.remove(&mid) {
+            return Self::parse_reply(pending);
+        }
+
+        loop {
+            let pending = self.recv_frame().await?;
+            let pending_mid = pending.info.mid;
+
+            if pending_mid == mid {
+                return Self::parse_reply(pending);
+            }
+
+            if self.pending_replies.insert(pending_mid, pending).is_some() {
+                return Err(Error::InternalError(format!(
+                    "duplicate pending SMB reply for mid {pending_mid}"
+                )));
+            }
+        }
     }
 
     /// Sends a generic message M and expects result generic R. There is no

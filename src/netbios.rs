@@ -169,7 +169,10 @@ impl NetBios {
 
     pub async fn open_raw(host: &str, port: u16) -> Result<Self, Error> {
         tracing::debug!("create NetBios connection to {}:{}", host, port);
+
         let stream = TcpStream::connect((host, port)).await?;
+        stream.set_nodelay(true)?;
+
         Ok(Self::from_stream(stream))
     }
 

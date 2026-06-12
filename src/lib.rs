@@ -747,12 +747,8 @@ impl SmbMediaStream {
         self.options
     }
 
-    pub fn worker(&self) -> &StreamingWorker {
-        &self.worker
-    }
-
-    pub fn into_worker(self) -> StreamingWorker {
-        self.worker
+    fn into_stream(self) -> FileStream {
+        self.worker.into_stream()
     }
 
     pub fn stats(&self) -> StreamingWorkerStats {
@@ -1471,26 +1467,6 @@ impl Cifs {
         ReadAhead::with_options(self.open_stream(share, path).await?, options)
     }
 
-    pub async fn open_streaming_worker(
-        &mut self,
-        share: &Share,
-        path: &str,
-    ) -> Result<StreamingWorker, Error> {
-        StreamingWorker::new(
-            self.open_stream(share, path).await?,
-            StreamingWorkerOptions::default(),
-        )
-    }
-
-    pub async fn open_streaming_worker_with_options(
-        &mut self,
-        share: &Share,
-        path: &str,
-        options: StreamingWorkerOptions,
-    ) -> Result<StreamingWorker, Error> {
-        StreamingWorker::new(self.open_stream(share, path).await?, options)
-    }
-
     pub async fn open_media_stream(
         &mut self,
         share: &Share,
@@ -1510,11 +1486,7 @@ impl Cifs {
     }
 
     pub async fn close_media_stream(&mut self, stream: SmbMediaStream) -> Result<(), Error> {
-        self.close_streaming_worker(stream.into_worker()).await
-    }
-
-    pub async fn close_streaming_worker(&mut self, worker: StreamingWorker) -> Result<(), Error> {
-        self.close_stream(worker.into_stream()).await
+        self.close_stream(stream.into_stream()).await
     }
 
     pub async fn opendir(&mut self, share: &Share, path: &str) -> Result<Handle, Error> {

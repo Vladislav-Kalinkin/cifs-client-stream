@@ -96,6 +96,20 @@ pub enum MediaKind {
     Video,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaExtraKind {
+    Extra,
+    Bonus,
+    DeletedScene,
+    Short,
+    Trailer,
+    Teaser,
+    Featurette,
+    BehindTheScenes,
+    Interview,
+    Sample,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaEntry {
     pub name: String,
@@ -1901,22 +1915,54 @@ fn is_audio_extension(extension: &str) -> bool {
     AUDIO_EXTENSIONS.contains(&extension.as_str())
 }
 
+pub fn media_extra_kind(name: &str) -> Option<MediaExtraKind> {
+    let normalized = normalized_media_name(name);
+
+    for (flag, kind) in [
+        ("--deleted-scenes", MediaExtraKind::DeletedScene),
+        ("--deleted-scene", MediaExtraKind::DeletedScene),
+        ("--deleted", MediaExtraKind::DeletedScene),
+        ("--behind-the-scenes", MediaExtraKind::BehindTheScenes),
+        ("--behind", MediaExtraKind::BehindTheScenes),
+        ("--featurette", MediaExtraKind::Featurette),
+        ("--interview", MediaExtraKind::Interview),
+        ("--trailer", MediaExtraKind::Trailer),
+        ("--teaser", MediaExtraKind::Teaser),
+        ("--sample", MediaExtraKind::Sample),
+        ("--short", MediaExtraKind::Short),
+        ("--bonus", MediaExtraKind::Bonus),
+        ("--extra", MediaExtraKind::Extra),
+    ] {
+        if normalized.contains(flag) {
+            return Some(kind);
+        }
+    }
+
+    for (marker, kind) in [
+        ("behind", MediaExtraKind::BehindTheScenes),
+        ("deleted", MediaExtraKind::DeletedScene),
+        ("extras", MediaExtraKind::Extra),
+        ("extra", MediaExtraKind::Extra),
+        ("featurette", MediaExtraKind::Featurette),
+        ("interview", MediaExtraKind::Interview),
+        ("sample", MediaExtraKind::Sample),
+        ("teaser", MediaExtraKind::Teaser),
+        ("trailer", MediaExtraKind::Trailer),
+    ] {
+        if normalized.contains(marker) {
+            return Some(kind);
+        }
+    }
+
+    None
+}
+
 fn is_likely_extra_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    [
-        "behind",
-        "deleted",
-        "extra",
-        "extras",
-        "featurette",
-        "interview",
-        "sample",
-        "scene",
-        "teaser",
-        "trailer",
-    ]
-    .iter()
-    .any(|marker| name.contains(marker))
+    media_extra_kind(name).is_some()
+}
+
+fn normalized_media_name(name: &str) -> String {
+    name.to_ascii_lowercase()
 }
 
 fn is_subtitle_extension(extension: &str) -> bool {
@@ -2039,12 +2085,12 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_likely_extra_video, is_media_entry, main_video_index, media_presentations,
-        read_count_for, resolve_smb_uri, retain_media_entries, seek_position, sort_dir_entries,
-        MediaEntry, MediaFolderSummary, MediaKind, MediaPresentation, ReadAhead, SmbMediaStream,
-        SmbMediaStreamOptions, StreamOptions, StreamingBuffer, StreamingWorker,
-        StreamingWorkerOptions, StreamingWorkerReadRequest, StreamingWorkerState,
-        StreamingWorkerStats, SMB_READ_MAX,
+        is_likely_extra_video, is_media_entry, main_video_index, media_extra_kind,
+        media_presentations, read_count_for, resolve_smb_uri, retain_media_entries, seek_position,
+        sort_dir_entries, MediaEntry, MediaExtraKind, MediaFolderSummary, MediaKind,
+        MediaPresentation, ReadAhead, SmbMediaStream, SmbMediaStreamOptions, StreamOptions,
+        StreamingBuffer, StreamingWorker, StreamingWorkerOptions, StreamingWorkerReadRequest,
+        StreamingWorkerState, StreamingWorkerStats, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -3096,5 +3142,78 @@ mod tests {
         ] {
             assert!(!is_media_entry(&fake_dir_entry(name, true)), "{name}");
         }
+    }
+    #[test]
+    fn media_extra_kind_recognizes_explicit_flags() {
+        assert_eq!(
+            media_extra_kind("Ice.Age - Gone Nutty --short.mkv"),
+            Some(MediaExtraKind::Short)
+        );
+        assert_eq!(
+            media_extra_kind("Deleted Scenes --deleted.mkv"),
+            Some(MediaExtraKind::DeletedScene)
+        );
+        assert_eq!(
+            media_extra_kind("Making Of --featurette.mkv"),
+            Some(MediaExtraKind::Featurette)
+        );
+        assert_eq!(
+            media_extra_kind("Trailer --trailer.mkv"),
+            Some(MediaExtraKind::Trailer)
+        );
+        assert_eq!(
+            media_extra_kind("Interview --interview.mkv"),
+            Some(MediaExtraKind::Interview)
+        );
+        assert_eq!(
+            media_extra_kind("Bonus Clip --bonus.mkv"),
+            Some(MediaExtraKind::Bonus)
+        );
+    }
+
+    #[test]
+    fn explicit_short_flag_keeps_movie_folder_collapsible() {
+        let entries = vec![
+            MediaEntry {
+                name: "Ice Age.mkv".to_owned(),
+                size: 10_000,
+                kind: MediaKind::Video,
+            },
+            MediaEntry {
+                name: "Ice.Age - Gone Nutty --short.mkv".to_owned(),
+                size: 2_000,
+                kind: MediaKind::Video,
+            },
+        ];
+
+        let summary = MediaFolderSummary::from_entries(&entries);
+
+        assert_eq!(summary.primary_videos, vec![0]);
+        assert_eq!(summary.main_video, Some(0));
+        assert_eq!(summary.extras, vec![1]);
+        assert!(summary.can_collapse_to_movie());
+    }
+
+    #[test]
+    fn unflagged_second_video_prevents_movie_folder_collapse() {
+        let entries = vec![
+            MediaEntry {
+                name: "Ice Age.mkv".to_owned(),
+                size: 10_000,
+                kind: MediaKind::Video,
+            },
+            MediaEntry {
+                name: "Ice.Age - Gone Nutty.mkv".to_owned(),
+                size: 2_000,
+                kind: MediaKind::Video,
+            },
+        ];
+
+        let summary = MediaFolderSummary::from_entries(&entries);
+
+        assert_eq!(summary.primary_videos, vec![0, 1]);
+        assert_eq!(summary.main_video, Some(0));
+        assert!(summary.extras.is_empty());
+        assert!(!summary.can_collapse_to_movie());
     }
 }

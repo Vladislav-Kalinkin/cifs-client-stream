@@ -375,14 +375,7 @@ impl ReadAhead {
     }
 
     pub async fn fill(&mut self, cifs: &mut Cifs) -> Result<(), Error> {
-        while self.can_buffer_more() && !self.eof {
-            let count = self.next_read_count();
-            match self.stream.read_next(cifs, count).await? {
-                Some(chunk) => self.push_chunk(chunk),
-                None => self.eof = true,
-            }
-        }
-
+        self.fill_to(cifs, self.options.read_ahead_capacity).await?;
         Ok(())
     }
 
@@ -391,7 +384,7 @@ impl ReadAhead {
     }
 
     pub async fn next(&mut self, cifs: &mut Cifs) -> Result<Option<Bytes>, Error> {
-        self.fill(cifs).await?;
+        self.fill_next_chunk(cifs).await?;
         Ok(self.pop_chunk())
     }
 
@@ -408,7 +401,7 @@ impl ReadAhead {
             return Ok(None);
         }
 
-        self.fill(cifs).await?;
+        self.fill_to(cifs, max_len).await?;
         Ok(self.pop_bytes(max_len))
     }
 
@@ -430,7 +423,7 @@ impl ReadAhead {
             return Ok(None);
         }
 
-        self.fill(cifs).await?;
+        self.fill_to(cifs, max_len).await?;
         Ok(self.pop_block(max_len))
     }
 
@@ -443,12 +436,43 @@ impl ReadAhead {
         with_timeout(timeout, self.read_block(cifs, max_len)).await
     }
 
+    async fn fill_next_chunk(&mut self, cifs: &mut Cifs) -> Result<(), Error> {
+        if self.chunks.is_empty() && !self.eof && self.can_buffer_more() {
+            let count = self.next_read_count();
+            match self.stream.read_next(cifs, count).await? {
+                Some(chunk) => self.push_chunk(chunk),
+                None => self.eof = true,
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn fill_to(&mut self, cifs: &mut Cifs, buffered_goal: usize) -> Result<(), Error> {
+        let buffered_goal = buffered_goal.min(self.options.read_ahead_capacity);
+        while self.buffered < buffered_goal && self.can_buffer_more() && !self.eof {
+            let count = self.next_read_count_for(buffered_goal);
+            match self.stream.read_next(cifs, count).await? {
+                Some(chunk) => self.push_chunk(chunk),
+                None => self.eof = true,
+            }
+        }
+
+        Ok(())
+    }
+
     fn can_buffer_more(&self) -> bool {
         self.options.read_ahead_capacity > self.buffered && self.options.chunk_size > 0
     }
 
     fn next_read_count(&self) -> u16 {
-        let free = self.options.read_ahead_capacity - self.buffered;
+        self.next_read_count_for(self.options.read_ahead_capacity)
+    }
+
+    fn next_read_count_for(&self, buffered_goal: usize) -> u16 {
+        let free = buffered_goal
+            .min(self.options.read_ahead_capacity)
+            .saturating_sub(self.buffered);
         read_count_for(free.min(usize::from(self.options.chunk_size)) as u64)
     }
 
@@ -1565,6 +1589,17 @@ mod tests {
         assert_eq!(buffer.next_read_count(), 8);
         buffer.push_chunk(Bytes::from_static(b"abcdef"));
         assert_eq!(buffer.next_read_count(), 4);
+    }
+
+    #[test]
+    fn read_ahead_next_read_count_can_target_requested_buffer() {
+        let mut buffer = ReadAhead::new(fake_stream(100), 10, 8);
+
+        assert_eq!(buffer.next_read_count_for(3), 3);
+        assert_eq!(buffer.next_read_count_for(20), 8);
+        buffer.push_chunk(Bytes::from_static(b"abcd"));
+        assert_eq!(buffer.next_read_count_for(6), 2);
+        assert_eq!(buffer.next_read_count_for(3), 0);
     }
 
     #[test]

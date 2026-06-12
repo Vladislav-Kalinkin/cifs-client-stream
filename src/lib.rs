@@ -53,7 +53,7 @@ pub struct Cifs {
 }
 
 #[derive(Debug)]
-pub struct FileStream {
+struct FileStream {
     handle: Handle,
     position: u64,
 }
@@ -68,7 +68,7 @@ pub struct DirectoryReader {
 }
 
 #[derive(Debug)]
-pub struct StreamingWorker {
+struct StreamingWorker {
     stream: FileStream,
     state: StreamingWorkerState,
 }
@@ -297,7 +297,7 @@ impl SmbMediaStreamOptions {
 }
 
 #[derive(Debug, Default)]
-pub struct StreamingBuffer {
+struct StreamingBuffer {
     chunks: VecDeque<Bytes>,
     buffered: usize,
 }
@@ -376,15 +376,9 @@ impl StreamingBuffer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StreamingWorkerReadRequest {
+struct StreamingWorkerReadRequest {
     pub offset: u64,
     pub len: usize,
-}
-
-impl StreamingWorkerReadRequest {
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -420,7 +414,7 @@ impl StreamingWorkerStats {
 }
 
 #[derive(Debug)]
-pub struct StreamingWorkerState {
+struct StreamingWorkerState {
     options: StreamingWorkerOptions,
     buffer: StreamingBuffer,
     playback_position: u64,
@@ -443,25 +437,8 @@ impl StreamingWorkerState {
         })
     }
 
-    pub fn with_defaults(file_size: u64) -> Self {
-        Self::new(file_size, StreamingWorkerOptions::default())
-            .expect("default streaming worker options must be valid")
-    }
-
-    pub fn options(&self) -> StreamingWorkerOptions {
-        self.options
-    }
-
-    pub fn playback_position(&self) -> u64 {
-        self.playback_position
-    }
-
     pub fn source_position(&self) -> u64 {
         self.source_position
-    }
-
-    pub fn file_size(&self) -> u64 {
-        self.file_size
     }
 
     pub fn buffered_len(&self) -> usize {
@@ -558,10 +535,6 @@ impl StreamingWorkerState {
         Some(chunk)
     }
 
-    pub fn mark_source_eof(&mut self) {
-        self.source_eof = true;
-    }
-
     pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
         let next = seek_position(self.file_size, self.playback_position, pos)?;
 
@@ -584,15 +557,6 @@ impl StreamingWorker {
         }
 
         Ok(Self { stream, state })
-    }
-
-    pub fn with_defaults(stream: FileStream) -> Self {
-        Self::new(stream, StreamingWorkerOptions::default())
-            .expect("default streaming worker options must be valid")
-    }
-
-    pub fn stream(&self) -> &FileStream {
-        &self.stream
     }
 
     pub fn into_stream(self) -> FileStream {
@@ -648,26 +612,9 @@ impl StreamingWorker {
         Ok(filled)
     }
 
-    pub async fn fill_until_buffered_timeout(
-        &mut self,
-        cifs: &mut Cifs,
-        buffered_goal: usize,
-        timeout: Duration,
-    ) -> Result<bool, Error> {
-        with_timeout(timeout, self.fill_until_buffered(cifs, buffered_goal)).await
-    }
-
     pub async fn prefill_to_high_watermark(&mut self, cifs: &mut Cifs) -> Result<bool, Error> {
         self.fill_until_buffered(cifs, self.state.options.high_watermark)
             .await
-    }
-
-    pub async fn prefill_to_high_watermark_timeout(
-        &mut self,
-        cifs: &mut Cifs,
-        timeout: Duration,
-    ) -> Result<bool, Error> {
-        with_timeout(timeout, self.prefill_to_high_watermark(cifs)).await
     }
 
     pub async fn read_block(
@@ -686,29 +633,15 @@ impl StreamingWorker {
 
         Ok(self.read_available(max_len))
     }
-
-    pub async fn read_block_timeout(
-        &mut self,
-        cifs: &mut Cifs,
-        max_len: usize,
-        timeout: Duration,
-    ) -> Result<Option<Bytes>, Error> {
-        with_timeout(timeout, self.read_block(cifs, max_len)).await
-    }
 }
 
 impl SmbMediaStream {
-    pub fn new(stream: FileStream, options: SmbMediaStreamOptions) -> Result<Self, Error> {
+    fn new(stream: FileStream, options: SmbMediaStreamOptions) -> Result<Self, Error> {
         options.validate()?;
 
         let worker = StreamingWorker::new(stream, options.worker_options)?;
 
         Ok(Self { worker, options })
-    }
-
-    pub fn with_defaults(stream: FileStream) -> Self {
-        Self::new(stream, SmbMediaStreamOptions::default())
-            .expect("default SMB media stream options must be valid")
     }
 
     pub fn options(&self) -> SmbMediaStreamOptions {
@@ -793,10 +726,6 @@ impl FileStream {
             handle,
             position: 0,
         }
-    }
-
-    pub fn handle(&self) -> &Handle {
-        &self.handle
     }
 
     pub fn into_handle(self) -> Handle {
@@ -1154,12 +1083,12 @@ impl Cifs {
         self.umount_ref(&share).await
     }
 
-    pub async fn openfile(&mut self, share: &Share, path: &str) -> Result<Handle, Error> {
+    async fn openfile(&mut self, share: &Share, path: &str) -> Result<Handle, Error> {
         self.command(msg::Open::file_ro(share.tid, sanitize_path(path)))
             .await
     }
 
-    pub async fn open_stream(&mut self, share: &Share, path: &str) -> Result<FileStream, Error> {
+    async fn open_stream(&mut self, share: &Share, path: &str) -> Result<FileStream, Error> {
         Ok(FileStream::new(self.openfile(share, path).await?))
     }
 
@@ -1194,36 +1123,17 @@ impl Cifs {
         self.close_ref(&file).await
     }
 
-    pub async fn close_stream(&mut self, stream: FileStream) -> Result<(), Error> {
+    async fn close_stream(&mut self, stream: FileStream) -> Result<(), Error> {
         self.close(stream.into_handle()).await
     }
 
-    pub async fn read(&mut self, file: &Handle, offset: u64) -> Result<Bytes, Error> {
-        self.read_at(file, offset, SMB_READ_MAX).await
-    }
-
-    pub async fn read_at(
-        &mut self,
-        file: &Handle,
-        offset: u64,
-        count: u16,
-    ) -> Result<Bytes, Error> {
+    async fn read_at(&mut self, file: &Handle, offset: u64, count: u16) -> Result<Bytes, Error> {
         if count == 0 {
             return Ok(Bytes::new());
         }
 
         let reply: reply::Read = self.command(msg::Read::handle(file, offset, count)).await?;
         Ok(reply.data)
-    }
-
-    pub async fn read_at_timeout(
-        &mut self,
-        file: &Handle,
-        offset: u64,
-        count: u16,
-        timeout: Duration,
-    ) -> Result<Bytes, Error> {
-        with_timeout(timeout, self.read_at(file, offset, count)).await
     }
 
     /// find_first starts a search for files in the given share for the given pattern.
@@ -2257,9 +2167,9 @@ mod tests {
             StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 4, 12).unwrap();
         let state = StreamingWorkerState::new(100, options).unwrap();
 
-        assert_eq!(state.playback_position(), 0);
+        assert_eq!(state.stats().playback_position, 0);
         assert_eq!(state.source_position(), 0);
-        assert_eq!(state.file_size(), 100);
+        assert_eq!(state.stats().file_size, 100);
         assert_eq!(state.buffered_len(), 0);
         assert!(!state.is_source_eof());
         assert_eq!(
@@ -2316,7 +2226,7 @@ mod tests {
         assert_eq!(state.pop_read(2).unwrap().as_ref(), b"ab");
 
         assert_eq!(state.seek(SeekFrom::Start(50)).unwrap(), 50);
-        assert_eq!(state.playback_position(), 50);
+        assert_eq!(state.stats().playback_position, 50);
         assert_eq!(state.source_position(), 50);
         assert_eq!(state.buffered_len(), 0);
         assert!(!state.is_source_eof());
@@ -2327,10 +2237,10 @@ mod tests {
     }
     #[test]
     fn streaming_worker_state_seek_to_end_marks_source_eof() {
-        let mut state = StreamingWorkerState::with_defaults(100);
+        let mut state = StreamingWorkerState::new(100, StreamingWorkerOptions::default()).unwrap();
 
         assert_eq!(state.seek(SeekFrom::End(0)).unwrap(), 100);
-        assert_eq!(state.playback_position(), 100);
+        assert_eq!(state.stats().playback_position, 100);
         assert_eq!(state.source_position(), 100);
         assert!(state.is_source_eof());
         assert!(state.is_finished());
@@ -2340,16 +2250,19 @@ mod tests {
         let mut stream = fake_stream(100);
         stream.seek(SeekFrom::Start(25)).unwrap();
 
-        let worker = StreamingWorker::with_defaults(stream);
+        let worker = StreamingWorker::new(stream, StreamingWorkerOptions::default()).unwrap();
 
         assert_eq!(worker.stats().playback_position, 25);
         assert_eq!(worker.stats().source_position, 25);
-        assert_eq!(worker.stream().position(), 25);
+        assert_eq!(worker.stream.position(), 25);
     }
 
     #[test]
     fn streaming_worker_read_available_drains_buffer() {
-        let mut worker = StreamingWorker::with_defaults(fake_stream(100));
+        let mut stream = fake_stream(100);
+        stream.seek(SeekFrom::Start(25)).unwrap();
+
+        let mut worker = StreamingWorker::new(stream, StreamingWorkerOptions::default()).unwrap();
 
         worker
             .state
@@ -2357,17 +2270,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(worker.read_available(2).unwrap().as_ref(), b"ab");
-        assert_eq!(worker.stats().playback_position, 2);
+        assert_eq!(worker.stats().playback_position, 27);
         assert_eq!(worker.stats().buffered, 4);
 
         assert_eq!(worker.read_available(10).unwrap().as_ref(), b"cdef");
-        assert_eq!(worker.stats().playback_position, 6);
+        assert_eq!(worker.stats().playback_position, 31);
         assert_eq!(worker.stats().buffered, 0);
     }
 
     #[test]
     fn streaming_worker_seek_clears_buffer_and_syncs_stream_position() {
-        let mut worker = StreamingWorker::with_defaults(fake_stream(100));
+        let mut worker =
+            StreamingWorker::new(fake_stream(100), StreamingWorkerOptions::default()).unwrap();
 
         worker
             .state
@@ -2380,12 +2294,13 @@ mod tests {
         assert_eq!(worker.stats().playback_position, 50);
         assert_eq!(worker.stats().source_position, 50);
         assert_eq!(worker.stats().buffered, 0);
-        assert_eq!(worker.stream().position(), 50);
+        assert_eq!(worker.stream.position(), 50);
     }
 
     #[test]
     fn streaming_worker_is_finished_after_source_eof_and_buffer_drained() {
-        let mut worker = StreamingWorker::with_defaults(fake_stream(3));
+        let mut worker =
+            StreamingWorker::new(fake_stream(3), StreamingWorkerOptions::default()).unwrap();
 
         worker
             .state
@@ -2562,7 +2477,8 @@ mod tests {
 
     #[test]
     fn smb_media_stream_seek_resets_buffer_and_positions() {
-        let mut stream = SmbMediaStream::with_defaults(fake_stream(100));
+        let mut stream =
+            SmbMediaStream::new(fake_stream(100), SmbMediaStreamOptions::default()).unwrap();
 
         stream
             .worker

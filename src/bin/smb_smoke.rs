@@ -3,8 +3,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use cifs_client::{
-    media_presentations, resolve_smb_uri, Auth, Cifs, Error, MediaPresentation,
-    SmbMediaStreamOptions, StreamOptions, StreamingWorkerOptions, StreamingWorkerStats,
+    media_presentations, media_presentations_with_summaries, resolve_smb_uri, Auth, Cifs, Error,
+    MediaEntry, MediaFolderSummary, MediaPresentation, Share, SmbMediaStreamOptions, StreamOptions,
+    StreamingWorkerOptions, StreamingWorkerStats,
 };
 
 const DEFAULT_READ_BYTES: usize = 256 * 1024;
@@ -53,6 +54,7 @@ async fn run() -> Result<(), Error> {
 
     let print_entries = env_bool("SMB_PRINT_ENTRIES", false);
     let print_blocks = env_bool("SMB_PRINT_BLOCKS", false);
+    let scan_folder_summaries = env_bool("SMB_SCAN_FOLDER_SUMMARIES", false);
     let worker_prefill_high = env_bool("SMB_WORKER_PREFILL_HIGH", false);
     let worker_initial_buffer = env_usize("SMB_WORKER_INITIAL_BUFFER_BYTES", 1024 * 1024);
 
@@ -118,7 +120,18 @@ async fn run() -> Result<(), Error> {
         .next_media_entries_timeout(&mut cifs, timeout)
         .await?
         .unwrap_or_default();
-    let presentations = media_presentations(&entries);
+
+    let folder_summaries = if scan_folder_summaries {
+        scan_media_folder_summaries(&mut cifs, &share, list_path, &entries, timeout).await?
+    } else {
+        Vec::new()
+    };
+
+    let presentations = if folder_summaries.is_empty() {
+        media_presentations(&entries)
+    } else {
+        media_presentations_with_summaries(&entries, &folder_summaries)
+    };
 
     println!("connected to {mount_path}");
     if let Some(parsed_hostname) = parsed_hostname {
@@ -142,6 +155,16 @@ async fn run() -> Result<(), Error> {
                 entry.size,
                 presentation_name(presentation)
             );
+
+            if let MediaPresentation::MovieFolder { summary, .. } = presentation {
+                println!(
+                    "  movie-folder: main_video={:?} primary_videos={} extras={} audio_tracks={}",
+                    summary.main_video,
+                    summary.primary_videos.len(),
+                    summary.extras.len(),
+                    summary.audio_tracks.len()
+                );
+            }
         }
     }
 
@@ -467,6 +490,49 @@ impl SmokePrefillMeasurements {
             mib_per_second(self.source_bytes, self.elapsed),
             self.slowest
         );
+    }
+}
+
+async fn scan_media_folder_summaries(
+    cifs: &mut Cifs,
+    share: &Share,
+    parent_path: Option<&str>,
+    entries: &[MediaEntry],
+    timeout: Duration,
+) -> Result<Vec<(usize, MediaFolderSummary)>, Error> {
+    let mut summaries = Vec::new();
+
+    for (index, entry) in entries.iter().enumerate() {
+        if !entry.is_folder() {
+            continue;
+        }
+
+        let folder_path = join_smb_path(parent_path, &entry.name);
+        let pattern = format!("{folder_path}/*");
+
+        let mut reader = cifs
+            .open_dir_reader_timeout(share, &pattern, timeout)
+            .await?;
+
+        let child_entries = reader
+            .next_media_entries_timeout(cifs, timeout)
+            .await?
+            .unwrap_or_default();
+
+        let summary = MediaFolderSummary::from_entries(&child_entries);
+
+        if summary.can_collapse_to_movie() {
+            summaries.push((index, summary));
+        }
+    }
+
+    Ok(summaries)
+}
+
+fn join_smb_path(parent: Option<&str>, child: &str) -> String {
+    match parent.map(str::trim).filter(|path| !path.is_empty()) {
+        Some(parent) => format!("{}/{}", parent.trim_end_matches('/'), child),
+        None => child.to_owned(),
     }
 }
 

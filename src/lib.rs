@@ -106,6 +106,7 @@ pub struct MediaEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaFolderSummary {
     pub main_video: Option<usize>,
+    pub primary_videos: Vec<usize>,
     pub extras: Vec<usize>,
     pub audio_tracks: Vec<usize>,
 }
@@ -1253,13 +1254,16 @@ impl MediaEntry {
 
 impl MediaFolderSummary {
     pub fn from_entries(entries: &[MediaEntry]) -> Self {
-        let main_video = main_video_index(entries);
+        let primary_videos = primary_video_indices(entries);
+        let main_video = largest_video_index(entries, &primary_videos);
+
         let extras = entries
             .iter()
             .enumerate()
-            .filter(|(index, entry)| Some(*index) != main_video && is_likely_extra_video(entry))
+            .filter(|(_, entry)| is_likely_extra_video(entry))
             .map(|(index, _)| index)
             .collect();
+
         let audio_tracks = entries
             .iter()
             .enumerate()
@@ -1269,13 +1273,14 @@ impl MediaFolderSummary {
 
         Self {
             main_video,
+            primary_videos,
             extras,
             audio_tracks,
         }
     }
 
     pub fn can_collapse_to_movie(&self) -> bool {
-        self.main_video.is_some()
+        self.primary_videos.len() == 1
     }
 }
 
@@ -1389,19 +1394,24 @@ pub fn retain_media_entries(entries: &mut Vec<DirInfo>) {
 }
 
 pub fn main_video_index(entries: &[MediaEntry]) -> Option<usize> {
+    let primary_videos = primary_video_indices(entries);
+    largest_video_index(entries, &primary_videos)
+}
+
+pub fn primary_video_indices(entries: &[MediaEntry]) -> Vec<usize> {
     entries
         .iter()
         .enumerate()
         .filter(|(_, entry)| entry.is_video() && !is_likely_extra_video(entry))
-        .max_by_key(|(_, entry)| entry.size)
-        .or_else(|| {
-            entries
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| entry.is_video())
-                .max_by_key(|(_, entry)| entry.size)
-        })
         .map(|(index, _)| index)
+        .collect()
+}
+
+fn largest_video_index(entries: &[MediaEntry], indices: &[usize]) -> Option<usize> {
+    indices
+        .iter()
+        .copied()
+        .max_by_key(|index| entries[*index].size)
 }
 
 pub fn is_likely_extra_video(entry: &MediaEntry) -> bool {
@@ -2030,11 +2040,11 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 mod tests {
     use super::{
         is_likely_extra_video, is_media_entry, main_video_index, media_presentations,
-        media_presentations_with_summaries, read_count_for, resolve_smb_uri, retain_media_entries,
-        seek_position, sort_dir_entries, MediaEntry, MediaFolderSummary, MediaKind,
-        MediaPresentation, ReadAhead, SmbMediaStream, SmbMediaStreamOptions, StreamOptions,
-        StreamingBuffer, StreamingWorker, StreamingWorkerOptions, StreamingWorkerReadRequest,
-        StreamingWorkerState, StreamingWorkerStats, SMB_READ_MAX,
+        read_count_for, resolve_smb_uri, retain_media_entries, seek_position, sort_dir_entries,
+        MediaEntry, MediaFolderSummary, MediaKind, MediaPresentation, ReadAhead, SmbMediaStream,
+        SmbMediaStreamOptions, StreamOptions, StreamingBuffer, StreamingWorker,
+        StreamingWorkerOptions, StreamingWorkerReadRequest, StreamingWorkerState,
+        StreamingWorkerStats, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -2377,13 +2387,28 @@ mod tests {
     }
 
     #[test]
-    fn main_video_index_falls_back_to_largest_video() {
+    fn main_video_index_ignores_extra_only_videos() {
         let entries = vec![
-            fake_media_entry("Trailer 1.mkv", 4_000, MediaKind::Video),
-            fake_media_entry("Trailer 2.mkv", 8_000, MediaKind::Video),
+            MediaEntry {
+                name: "Trailer.mkv".to_owned(),
+                size: 10_000,
+                kind: MediaKind::Video,
+            },
+            MediaEntry {
+                name: "Sample.mkv".to_owned(),
+                size: 20_000,
+                kind: MediaKind::Video,
+            },
         ];
 
-        assert_eq!(main_video_index(&entries), Some(1));
+        assert_eq!(main_video_index(&entries), None);
+
+        let summary = MediaFolderSummary::from_entries(&entries);
+
+        assert_eq!(summary.main_video, None);
+        assert!(summary.primary_videos.is_empty());
+        assert_eq!(summary.extras, vec![0, 1]);
+        assert!(!summary.can_collapse_to_movie());
     }
 
     #[test]
@@ -2438,48 +2463,75 @@ mod tests {
     }
 
     #[test]
-    fn media_presentation_can_collapse_folder_with_summary() {
-        let folder = fake_media_entry("Movie Folder", 0, MediaKind::Folder);
-        let summary = MediaFolderSummary {
-            main_video: Some(0),
-            extras: vec![1],
-            audio_tracks: vec![2],
-        };
+    fn media_folder_summary_collapses_single_movie_folder() {
+        let entries = vec![
+            MediaEntry {
+                name: "Movie.mkv".to_owned(),
+                size: 10_000,
+                kind: MediaKind::Video,
+            },
+            MediaEntry {
+                name: "Trailer.mkv".to_owned(),
+                size: 1_000,
+                kind: MediaKind::Video,
+            },
+        ];
 
-        assert_eq!(
-            MediaPresentation::from_entry(4, &folder, Some(summary.clone())),
-            MediaPresentation::MovieFolder { index: 4, summary }
-        );
+        let summary = MediaFolderSummary::from_entries(&entries);
+
+        assert_eq!(summary.primary_videos, vec![0]);
+        assert_eq!(summary.main_video, Some(0));
+        assert_eq!(summary.extras, vec![1]);
+        assert!(summary.can_collapse_to_movie());
     }
 
     #[test]
-    fn media_presentations_apply_folder_summaries_by_index() {
+    fn media_folder_summary_does_not_collapse_movie_collection() {
         let entries = vec![
-            fake_media_entry("Movie Folder", 0, MediaKind::Folder),
-            fake_media_entry("Season Folder", 0, MediaKind::Folder),
-            fake_media_entry("Loose Movie.mkv", 10_000, MediaKind::Video),
+            MediaEntry {
+                name: "Movie 1.mkv".to_owned(),
+                size: 10_000,
+                kind: MediaKind::Video,
+            },
+            MediaEntry {
+                name: "Movie 2.mkv".to_owned(),
+                size: 12_000,
+                kind: MediaKind::Video,
+            },
         ];
-        let summary = MediaFolderSummary {
-            main_video: Some(0),
-            extras: vec![1],
-            audio_tracks: vec![],
-        };
 
-        let presentations = media_presentations_with_summaries(&entries, &[(0, summary.clone())]);
+        let summary = MediaFolderSummary::from_entries(&entries);
 
-        assert_eq!(
-            presentations,
-            vec![
-                MediaPresentation::MovieFolder { index: 0, summary },
-                MediaPresentation::Folder { index: 1 },
-                MediaPresentation::PlayableFile { index: 2 },
-            ]
-        );
-        assert_eq!(presentations[0].index(), 0);
-        assert!(presentations[0].is_movie_folder());
-        assert!(presentations[0].is_playable());
-        assert!(!presentations[1].is_playable());
-        assert!(presentations[2].is_playable());
+        assert_eq!(summary.primary_videos, vec![0, 1]);
+        assert_eq!(summary.main_video, Some(1));
+        assert!(!summary.can_collapse_to_movie());
+    }
+
+    #[test]
+    fn media_folder_summary_does_not_collapse_episode_folder() {
+        let entries = vec![
+            MediaEntry {
+                name: "Episode 01.mkv".to_owned(),
+                size: 1_000,
+                kind: MediaKind::Video,
+            },
+            MediaEntry {
+                name: "Episode 02.mkv".to_owned(),
+                size: 1_100,
+                kind: MediaKind::Video,
+            },
+            MediaEntry {
+                name: "Episode 03.mkv".to_owned(),
+                size: 1_200,
+                kind: MediaKind::Video,
+            },
+        ];
+
+        let summary = MediaFolderSummary::from_entries(&entries);
+
+        assert_eq!(summary.primary_videos.len(), 3);
+        assert_eq!(summary.main_video, Some(2));
+        assert!(!summary.can_collapse_to_movie());
     }
 
     #[test]

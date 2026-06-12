@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use cifs_client::{
     media_presentations, resolve_smb_uri, Auth, Cifs, Error, MediaPresentation, ReadAheadStats,
-    StreamOptions, StreamingWorkerOptions, StreamingWorkerStats,
+    SmbMediaStreamOptions, StreamOptions, StreamingWorkerOptions, StreamingWorkerStats,
 };
 
 const DEFAULT_READ_BYTES: usize = 256 * 1024;
@@ -171,29 +171,33 @@ async fn run() -> Result<(), Error> {
             );
             let worker_options =
                 StreamingWorkerOptions::new(stream_options, low_watermark, high_watermark)?;
+            let media_stream_options =
+                SmbMediaStreamOptions::new(worker_options, worker_initial_buffer)?;
 
             println!(
                 "worker options: low_watermark={} high_watermark={} initial_buffer={}",
-                worker_options.low_watermark, worker_options.high_watermark, worker_initial_buffer
+                media_stream_options.worker_options.low_watermark,
+                media_stream_options.worker_options.high_watermark,
+                media_stream_options.initial_buffer_size
             );
 
-            let mut worker = cifs
-                .open_streaming_worker_with_options(&share, &path, worker_options)
+            let mut media_stream = cifs
+                .open_media_stream_with_options(&share, &path, media_stream_options)
                 .await?;
 
             let mut initial_prefill_elapsed = Duration::ZERO;
             let mut initial_prefill_bytes = 0usize;
 
-            if worker_initial_buffer > 0 {
-                let before = worker.stats();
+            if media_stream_options.initial_buffer_size > 0 {
+                let before = media_stream.stats();
                 let initial_started = Instant::now();
 
-                worker
-                    .fill_until_buffered_timeout(&mut cifs, worker_initial_buffer, timeout)
+                media_stream
+                    .fill_initial_buffer_timeout(&mut cifs, timeout)
                     .await?;
 
                 let initial_elapsed = initial_started.elapsed();
-                let after = worker.stats();
+                let after = media_stream.stats();
                 let source_delta = after.source_position.saturating_sub(before.source_position);
 
                 initial_prefill_elapsed = initial_elapsed;
@@ -219,14 +223,14 @@ async fn run() -> Result<(), Error> {
             let mut prefill_measurements = SmokePrefillMeasurements::default();
 
             for block_index in 0..read_blocks {
-                let before = worker.stats();
+                let before = media_stream.stats();
                 let block_started = Instant::now();
-                let block = worker
+                let block = media_stream
                     .read_block_timeout(&mut cifs, read_bytes, timeout)
                     .await?
                     .unwrap_or_default();
                 let block_elapsed = block_started.elapsed();
-                let after = worker.stats();
+                let after = media_stream.stats();
 
                 if block.is_empty() {
                     println!("reached EOF after {} blocks", block_index);
@@ -242,16 +246,16 @@ async fn run() -> Result<(), Error> {
                     print_blocks,
                 );
 
-                if worker_prefill_high && worker.should_prefill() {
-                    let before_prefill = worker.stats();
+                if worker_prefill_high && media_stream.should_prefill() {
+                    let before_prefill = media_stream.stats();
                     let prefill_started = Instant::now();
 
-                    worker
-                        .prefill_to_high_watermark_timeout(&mut cifs, timeout)
+                    media_stream
+                        .maybe_prefill_timeout(&mut cifs, timeout)
                         .await?;
 
                     let prefill_elapsed = prefill_started.elapsed();
-                    let after_prefill = worker.stats();
+                    let after_prefill = media_stream.stats();
                     let source_delta = after_prefill
                         .source_position
                         .saturating_sub(before_prefill.source_position)
@@ -294,7 +298,7 @@ async fn run() -> Result<(), Error> {
                 );
             }
 
-            cifs.close_streaming_worker(worker).await?;
+            cifs.close_media_stream(media_stream).await?;
         }
     }
 

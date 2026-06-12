@@ -53,6 +53,7 @@ async fn run() -> Result<(), Error> {
     let legacy_read_ahead = env_bool("SMB_LEGACY_READ_AHEAD", false);
     let print_entries = env_bool("SMB_PRINT_ENTRIES", false);
     let print_blocks = env_bool("SMB_PRINT_BLOCKS", false);
+    let worker_prefill_high = env_bool("SMB_WORKER_PREFILL_HIGH", false);
     let worker_initial_buffer = env_usize("SMB_WORKER_INITIAL_BUFFER_BYTES", 1024 * 1024);
 
     let timeout = Duration::from_millis(timeout);
@@ -113,7 +114,7 @@ async fn run() -> Result<(), Error> {
 
     if let Some(path) = read_path {
         println!(
-            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} chunk_size={} mode={} print_blocks={}",
+            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} chunk_size={} mode={} print_blocks={} prefill_high={}",
             read_bytes,
             read_blocks,
             stream_options.read_ahead_capacity,
@@ -123,7 +124,8 @@ async fn run() -> Result<(), Error> {
             } else {
                 "streaming-worker"
             },
-            print_blocks
+            print_blocks,
+            worker_prefill_high
         );
 
         if legacy_read_ahead {
@@ -214,6 +216,7 @@ async fn run() -> Result<(), Error> {
 
             let started = Instant::now();
             let mut measurements = SmokeMeasurements::new(read_blocks);
+            let mut prefill_measurements = SmokePrefillMeasurements::default();
 
             for block_index in 0..read_blocks {
                 let before = worker.stats();
@@ -238,10 +241,46 @@ async fn run() -> Result<(), Error> {
                     SmokeBlockStats::from_worker(&after),
                     print_blocks,
                 );
+
+                if worker_prefill_high && worker.should_prefill() {
+                    let before_prefill = worker.stats();
+                    let prefill_started = Instant::now();
+
+                    worker
+                        .prefill_to_high_watermark_timeout(&mut cifs, timeout)
+                        .await?;
+
+                    let prefill_elapsed = prefill_started.elapsed();
+                    let after_prefill = worker.stats();
+                    let source_delta = after_prefill
+                        .source_position
+                        .saturating_sub(before_prefill.source_position)
+                        as usize;
+
+                    prefill_measurements.record(source_delta, prefill_elapsed);
+
+                    if print_blocks && source_delta > 0 {
+                        println!(
+                            concat!(
+                                "prefill after block {} source {}->{} source_delta={} ",
+                                "in {:?} ({:.2} MiB/s) buffered={} chunks={}"
+                            ),
+                            block_index + 1,
+                            before_prefill.source_position,
+                            after_prefill.source_position,
+                            source_delta,
+                            prefill_elapsed,
+                            mib_per_second(source_delta, prefill_elapsed),
+                            after_prefill.buffered,
+                            after_prefill.buffered_chunks
+                        );
+                    }
+                }
             }
 
             let elapsed = started.elapsed();
             measurements.print_summary(&path, elapsed);
+            prefill_measurements.print_summary();
 
             if worker_initial_buffer > 0 {
                 let total_with_initial = elapsed + initial_prefill_elapsed;
@@ -402,6 +441,42 @@ impl SmokeMeasurements {
                 percentile_duration(&mut self.block_times, 99)
             );
         }
+    }
+}
+
+#[derive(Default)]
+struct SmokePrefillMeasurements {
+    events: usize,
+    source_bytes: usize,
+    elapsed: Duration,
+    slowest: Duration,
+}
+
+impl SmokePrefillMeasurements {
+    fn record(&mut self, source_bytes: usize, elapsed: Duration) {
+        if source_bytes == 0 {
+            return;
+        }
+
+        self.events += 1;
+        self.source_bytes += source_bytes;
+        self.elapsed += elapsed;
+        self.slowest = self.slowest.max(elapsed);
+    }
+
+    fn print_summary(&self) {
+        if self.events == 0 {
+            return;
+        }
+
+        println!(
+            "prefill events: {} source bytes {} in {:?} ({:.2} MiB/s), slowest {:?}",
+            self.events,
+            self.source_bytes,
+            self.elapsed,
+            mib_per_second(self.source_bytes, self.elapsed),
+            self.slowest
+        );
     }
 }
 

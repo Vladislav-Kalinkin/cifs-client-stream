@@ -52,6 +52,7 @@ async fn run() -> Result<(), Error> {
     let use_streaming_worker = env_bool("SMB_STREAMING_WORKER", false);
     let print_entries = env_bool("SMB_PRINT_ENTRIES", false);
     let worker_prefill = env_bool("SMB_WORKER_PREFILL", false);
+    let worker_buffer_goal = env_usize("SMB_WORKER_BUFFER_GOAL_BYTES", 0);
 
     let timeout = Duration::from_millis(timeout);
 
@@ -118,6 +119,8 @@ async fn run() -> Result<(), Error> {
             stream_options.chunk_size,
             if use_streaming_worker && worker_prefill {
                 "streaming-worker-prefill"
+            } else if use_streaming_worker && worker_buffer_goal > 0 {
+                "streaming-worker-buffer-goal"
             } else if use_streaming_worker {
                 "streaming-worker"
             } else {
@@ -142,10 +145,11 @@ async fn run() -> Result<(), Error> {
             )?;
 
             println!(
-                "worker options: low_watermark={} high_watermark={} read_request_size={}",
+                "worker options: low_watermark={} high_watermark={} read_request_size={} buffer_goal={}",
                 worker_options.low_watermark,
                 worker_options.high_watermark,
-                worker_options.read_request_size
+                worker_options.read_request_size,
+                worker_buffer_goal
             );
 
             let mut worker = cifs
@@ -205,6 +209,18 @@ async fn run() -> Result<(), Error> {
                 let block_started = Instant::now();
 
                 let block = if worker_prefill {
+                    match worker.read_available(read_bytes) {
+                        Some(block) => block,
+                        None => worker
+                            .read_block_timeout(&mut cifs, read_bytes, timeout)
+                            .await?
+                            .unwrap_or_default(),
+                    }
+                } else if worker_buffer_goal > 0 {
+                    worker
+                        .fill_until_buffered_timeout(&mut cifs, worker_buffer_goal, timeout)
+                        .await?;
+
                     match worker.read_available(read_bytes) {
                         Some(block) => block,
                         None => worker

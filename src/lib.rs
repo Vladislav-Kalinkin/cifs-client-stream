@@ -104,6 +104,38 @@ pub struct MediaEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmbShareInfo {
+    pub name: String,
+    pub kind: SmbShareKind,
+    pub comment: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmbShareKind {
+    Disk,
+    Printer,
+    Device,
+    Ipc,
+    Unknown(u16),
+}
+
+impl SmbShareKind {
+    fn from_raw(raw: u16) -> Self {
+        match raw & 0x00ff {
+            0x0000 => Self::Disk,
+            0x0001 => Self::Printer,
+            0x0002 => Self::Device,
+            0x0003 => Self::Ipc,
+            value => Self::Unknown(value),
+        }
+    }
+
+    pub fn is_browsable_volume(&self) -> bool {
+        matches!(self, Self::Disk)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaFolderSummary {
     pub main_video: Option<usize>,
     pub extras: Vec<usize>,
@@ -1574,6 +1606,12 @@ impl Cifs {
         timeout: Duration,
     ) -> Result<DirectoryReader, Error> {
         with_timeout(timeout, self.open_dir_reader(share, pattern)).await
+    }
+
+    pub async fn list_shares(&mut self) -> Result<Vec<SmbShareInfo>, Error> {
+        Err(Error::Unsupported(
+            "SMB1 share discovery is not implemented yet".to_owned(),
+        ))
     }
 
     /// find_next continues a search in the given share: sid must be the search

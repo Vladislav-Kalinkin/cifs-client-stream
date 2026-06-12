@@ -78,8 +78,25 @@ async fn run() -> Result<(), Error> {
             );
         }
         println!("server root URI detected: smb://{}/", config.hostname);
-        println!("share discovery is not implemented yet");
-        println!("next step: add SMB1 share listing and show shares as virtual Volumes");
+        match cifs.list_shares().await {
+            Ok(shares) => {
+                println!("shares:");
+                for share in shares {
+                    println!(
+                        "- {} kind={:?} browsable={} comment={}",
+                        share.name,
+                        share.kind,
+                        share.kind.is_browsable_volume(),
+                        share.comment
+                    );
+                }
+            }
+            Err(error) => {
+                println!("share discovery failed: {error}");
+                println!("next step: implement SMB1 RAP NetShareEnum over IPC$");
+            }
+        }
+
         return Ok(());
     };
 

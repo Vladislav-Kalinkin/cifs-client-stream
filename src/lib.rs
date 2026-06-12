@@ -76,6 +76,12 @@ pub struct DirectoryReader {
     end: bool,
 }
 
+#[derive(Debug)]
+pub struct StreamingWorker {
+    stream: FileStream,
+    state: StreamingWorkerState,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaKind {
     Folder,
@@ -545,6 +551,67 @@ impl StreamingWorkerState {
         self.source_eof = next >= self.file_size;
 
         Ok(next)
+    }
+}
+
+impl StreamingWorker {
+    pub fn new(stream: FileStream, options: StreamingWorkerOptions) -> Result<Self, Error> {
+        let position = stream.position();
+        let mut state = StreamingWorkerState::new(stream.size(), options)?;
+
+        if position != 0 {
+            state.seek(SeekFrom::Start(position))?;
+        }
+
+        Ok(Self { stream, state })
+    }
+
+    pub fn with_defaults(stream: FileStream) -> Self {
+        Self::new(stream, StreamingWorkerOptions::default())
+            .expect("default streaming worker options must be valid")
+    }
+
+    pub fn stream(&self) -> &FileStream {
+        &self.stream
+    }
+
+    pub fn into_stream(self) -> FileStream {
+        self.stream
+    }
+
+    pub fn stats(&self) -> StreamingWorkerStats {
+        self.state.stats()
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.state.is_finished()
+    }
+
+    pub fn read_available(&mut self, max_len: usize) -> Option<Bytes> {
+        self.state.pop_read(max_len)
+    }
+
+    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+        let next = self.state.seek(pos)?;
+        self.stream.seek(SeekFrom::Start(next))?;
+        Ok(next)
+    }
+
+    pub async fn fill_once(&mut self, cifs: &mut Cifs) -> Result<bool, Error> {
+        let Some(request) = self.state.next_source_read_request() else {
+            return Ok(false);
+        };
+
+        let count: u16 = request.len.try_into()?;
+        let chunk = cifs
+            .read_at(&self.stream.handle, request.offset, count)
+            .await?;
+
+        self.state.push_source_chunk(chunk)?;
+        self.stream
+            .seek(SeekFrom::Start(self.state.source_position()))?;
+
+        Ok(true)
     }
 }
 
@@ -1196,6 +1263,30 @@ impl Cifs {
         ReadAhead::with_options(self.open_stream(share, path).await?, options)
     }
 
+    pub async fn open_streaming_worker(
+        &mut self,
+        share: &Share,
+        path: &str,
+    ) -> Result<StreamingWorker, Error> {
+        StreamingWorker::new(
+            self.open_stream(share, path).await?,
+            StreamingWorkerOptions::default(),
+        )
+    }
+
+    pub async fn open_streaming_worker_with_options(
+        &mut self,
+        share: &Share,
+        path: &str,
+        options: StreamingWorkerOptions,
+    ) -> Result<StreamingWorker, Error> {
+        StreamingWorker::new(self.open_stream(share, path).await?, options)
+    }
+
+    pub async fn close_streaming_worker(&mut self, worker: StreamingWorker) -> Result<(), Error> {
+        self.close_stream(worker.into_stream()).await
+    }
+
     pub async fn opendir(&mut self, share: &Share, path: &str) -> Result<Handle, Error> {
         self.command(msg::Open::dir(share.tid, sanitize_path(path)))
             .await
@@ -1801,8 +1892,8 @@ mod tests {
         is_likely_extra_video, is_media_entry, main_video_index, media_presentations,
         media_presentations_with_summaries, read_count_for, resolve_smb_uri, retain_media_entries,
         seek_position, sort_dir_entries, MediaEntry, MediaFolderSummary, MediaKind,
-        MediaPresentation, ReadAhead, StreamOptions, StreamingBuffer, StreamingWorkerOptions,
-        StreamingWorkerReadRequest, StreamingWorkerState, SMB_READ_MAX,
+        MediaPresentation, ReadAhead, StreamOptions, StreamingBuffer, StreamingWorker,
+        StreamingWorkerOptions, StreamingWorkerReadRequest, StreamingWorkerState, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -2618,5 +2709,68 @@ mod tests {
 
         assert_eq!(state.seek(SeekFrom::End(0)).unwrap(), 100);
         assert_eq!(state.next_source_read_request(), None);
+    }
+
+    #[test]
+    fn streaming_worker_starts_from_stream_position() {
+        let mut stream = fake_stream(100);
+        stream.seek(SeekFrom::Start(25)).unwrap();
+
+        let worker = StreamingWorker::with_defaults(stream);
+
+        assert_eq!(worker.stats().playback_position, 25);
+        assert_eq!(worker.stats().source_position, 25);
+        assert_eq!(worker.stream().position(), 25);
+    }
+
+    #[test]
+    fn streaming_worker_read_available_drains_buffer() {
+        let mut worker = StreamingWorker::with_defaults(fake_stream(100));
+
+        worker
+            .state
+            .push_source_chunk(Bytes::from_static(b"abcdef"))
+            .unwrap();
+
+        assert_eq!(worker.read_available(2).unwrap().as_ref(), b"ab");
+        assert_eq!(worker.stats().playback_position, 2);
+        assert_eq!(worker.stats().buffered, 4);
+
+        assert_eq!(worker.read_available(10).unwrap().as_ref(), b"cdef");
+        assert_eq!(worker.stats().playback_position, 6);
+        assert_eq!(worker.stats().buffered, 0);
+    }
+
+    #[test]
+    fn streaming_worker_seek_clears_buffer_and_syncs_stream_position() {
+        let mut worker = StreamingWorker::with_defaults(fake_stream(100));
+
+        worker
+            .state
+            .push_source_chunk(Bytes::from_static(b"abcdef"))
+            .unwrap();
+
+        assert_eq!(worker.read_available(2).unwrap().as_ref(), b"ab");
+        assert_eq!(worker.seek(SeekFrom::Start(50)).unwrap(), 50);
+
+        assert_eq!(worker.stats().playback_position, 50);
+        assert_eq!(worker.stats().source_position, 50);
+        assert_eq!(worker.stats().buffered, 0);
+        assert_eq!(worker.stream().position(), 50);
+    }
+
+    #[test]
+    fn streaming_worker_is_finished_after_source_eof_and_buffer_drained() {
+        let mut worker = StreamingWorker::with_defaults(fake_stream(3));
+
+        worker
+            .state
+            .push_source_chunk(Bytes::from_static(b"abc"))
+            .unwrap();
+
+        assert!(!worker.is_finished());
+
+        assert_eq!(worker.read_available(10).unwrap().as_ref(), b"abc");
+        assert!(worker.is_finished());
     }
 }

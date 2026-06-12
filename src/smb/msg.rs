@@ -366,23 +366,6 @@ impl Open {
             security: SecurityFlags::empty(),
         }
     }
-
-    pub fn dir(tid: u16, filename: String) -> Self {
-        Self {
-            tid,
-            filename,
-            create_flags: CreateFlags::empty(),
-            directory: 0,
-            access: FileAccessMask::READ,
-            allocation_size: 0,
-            attributes: ExtFileAttr::empty(),
-            share_access: ShareAccess::READ | ShareAccess::WRITE | ShareAccess::DELETE,
-            disposition: CreateDisposition::OPEN,
-            options: CreateOptions::DIRECTORY,
-            impersonation: ImpersonationLevel::IMPERSONATE,
-            security: SecurityFlags::empty(),
-        }
-    }
 }
 
 impl Msg for Open {

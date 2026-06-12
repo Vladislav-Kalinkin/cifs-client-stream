@@ -1185,11 +1185,6 @@ impl Cifs {
         self.close_stream(stream.into_stream()).await
     }
 
-    pub async fn opendir(&mut self, share: &Share, path: &str) -> Result<Handle, Error> {
-        self.command(msg::Open::dir(share.tid, sanitize_path(path)))
-            .await
-    }
-
     pub async fn close_ref(&mut self, file: &Handle) -> Result<(), Error> {
         let _: reply::Close = self.command(msg::Close::handle(file)).await?;
         Ok(())

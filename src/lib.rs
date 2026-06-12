@@ -22,6 +22,8 @@ use crate::win::{ExtFileAttr, FileAttr, NTStatus};
 
 const DEFAULT_READ_AHEAD_CAPACITY: usize = 8 * 1024 * 1024;
 const DEFAULT_STREAM_CHUNK_SIZE: u16 = SMB_READ_MAX;
+const DEFAULT_MEDIA_INITIAL_BUFFER_SIZE: usize = 1024 * 1024;
+const DEFAULT_MEDIA_PREFILL_TARGET_SIZE: usize = 2 * 1024 * 1024;
 const AUDIO_EXTENSIONS: &[&str] = &[
     "aac", "aiff", "alac", "flac", "m4a", "mp3", "ogg", "opus", "wav",
 ];
@@ -285,11 +287,11 @@ pub struct SmbMediaStreamOptions {
 impl Default for SmbMediaStreamOptions {
     fn default() -> Self {
         let stream_options = StreamOptions::default();
-        let initial_buffer_size = 1024 * 1024;
+        let initial_buffer_size = DEFAULT_MEDIA_INITIAL_BUFFER_SIZE;
         let worker_options = StreamingWorkerOptions::new(
             stream_options,
             initial_buffer_size,
-            stream_options.read_ahead_capacity,
+            DEFAULT_MEDIA_PREFILL_TARGET_SIZE,
         )
         .expect("default SMB media stream options must be valid");
 
@@ -2957,9 +2959,10 @@ mod tests {
 
         assert_eq!(options.initial_buffer_size, 1024 * 1024);
         assert_eq!(options.worker_options.low_watermark, 1024 * 1024);
+        assert_eq!(options.worker_options.high_watermark, 2 * 1024 * 1024);
         assert_eq!(
-            options.worker_options.high_watermark,
-            options.worker_options.stream_options.read_ahead_capacity
+            options.worker_options.stream_options.read_ahead_capacity,
+            8 * 1024 * 1024
         );
         assert!(options.validate().is_ok());
     }

@@ -165,20 +165,24 @@ async fn run() -> Result<(), Error> {
         } else {
             let default_low_watermark = worker_initial_buffer.max(read_bytes);
             let low_watermark = env_usize("SMB_LOW_WATERMARK_BYTES", default_low_watermark);
-            let high_watermark = env_usize(
-                "SMB_HIGH_WATERMARK_BYTES",
-                stream_options.read_ahead_capacity,
-            );
+            let default_prefill_target = worker_initial_buffer
+                .saturating_mul(2)
+                .max(read_bytes)
+                .min(stream_options.read_ahead_capacity);
+
+            let high_watermark = env_usize_optional("SMB_WORKER_PREFILL_TARGET_BYTES")
+                .unwrap_or_else(|| env_usize("SMB_HIGH_WATERMARK_BYTES", default_prefill_target));
             let worker_options =
                 StreamingWorkerOptions::new(stream_options, low_watermark, high_watermark)?;
             let media_stream_options =
                 SmbMediaStreamOptions::new(worker_options, worker_initial_buffer)?;
 
             println!(
-                "worker options: low_watermark={} high_watermark={} initial_buffer={}",
+                "worker options: low_watermark={} high_watermark={} initial_buffer={} prefill_target={}",
                 media_stream_options.worker_options.low_watermark,
                 media_stream_options.worker_options.high_watermark,
-                media_stream_options.initial_buffer_size
+                media_stream_options.initial_buffer_size,
+                media_stream_options.worker_options.high_watermark
             );
 
             let mut media_stream = cifs
@@ -497,6 +501,10 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+fn env_usize_optional(name: &str) -> Option<usize> {
+    env::var(name).ok().and_then(|value| value.parse().ok())
 }
 
 fn env_usize(name: &str, default: usize) -> usize {

@@ -1961,7 +1961,7 @@ pub struct CifsConfig<'a> {
     pub password: Option<&'a str>,
     pub hostname: &'a str,
     pub port: Option<u16>,
-    pub share: &'a str,
+    pub share: Option<&'a str>,
     pub path: Option<&'a str>,
 }
 
@@ -1971,7 +1971,7 @@ pub struct CifsConfig<'a> {
 pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
     lazy_static! {
         static ref URI_REGEX: Regex =
-            Regex::new(r"smb://((?P<domain>\w+);)?((?P<user>[\w\.\+_-]+)(:(?P<passwd>[^@]*))?@)?(?P<host>\w[\w\.-]*)(:(?P<port>\d+))?/(?P<share>[\w\._-]+)(/(?P<path>.*))?")
+            Regex::new(r"^smb://((?P<domain>\w+);)?((?P<user>[\w\.\+_-]+)(:(?P<passwd>[^@]*))?@)?(?P<host>\w[\w\.-]*)(:(?P<port>\d+))?(/(?P<share>[\w\._-]+)(/(?P<path>.*))?)?/?$")
                 .expect("can't compile URI regex");
     }
 
@@ -1992,7 +1992,7 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
             .transpose()
             .map_err(|_| Error::InvalidUri)?,
 
-        share: uri_match.name("share").ok_or(Error::InvalidUri)?.as_str(),
+        share: uri_match.name("share").map(|m| m.as_str()),
 
         path: uri_match.name("path").map(|m| m.as_str()),
     };
@@ -2466,7 +2466,7 @@ mod tests {
         assert_eq!(config.password, None);
         assert_eq!(config.hostname, "localhost");
         assert_eq!(config.port, None);
-        assert_eq!(config.share, "myshare");
+        assert_eq!(config.share, Some("myshare"));
         assert_eq!(config.path, Some("this/is/a/path"));
 
         let uri = "smb://www.example.org:31337/foo";
@@ -2476,7 +2476,7 @@ mod tests {
         assert_eq!(config.password, None);
         assert_eq!(config.hostname, "www.example.org");
         assert_eq!(config.port, Some(31337));
-        assert_eq!(config.share, "foo");
+        assert_eq!(config.share, Some("foo"));
         assert_eq!(config.path, None);
 
         let uri = "smb://127.0.0.1:445/share/foo";
@@ -2486,7 +2486,7 @@ mod tests {
         assert_eq!(config.password, None);
         assert_eq!(config.hostname, "127.0.0.1");
         assert_eq!(config.port, Some(445));
-        assert_eq!(config.share, "share");
+        assert_eq!(config.share, Some("share"));
         assert_eq!(config.path, Some("foo"));
 
         let uri = "smb://anonymous@localhost/public";
@@ -2496,7 +2496,7 @@ mod tests {
         assert_eq!(config.password, None);
         assert_eq!(config.hostname, "localhost");
         assert_eq!(config.port, None);
-        assert_eq!(config.share, "public");
+        assert_eq!(config.share, Some("public"));
         assert_eq!(config.path, None);
 
         let uri = "smb://john:secret@localhost/closed";
@@ -2506,7 +2506,7 @@ mod tests {
         assert_eq!(config.password, Some("secret"));
         assert_eq!(config.hostname, "localhost");
         assert_eq!(config.port, None);
-        assert_eq!(config.share, "closed");
+        assert_eq!(config.share, Some("closed"));
         assert_eq!(config.path, None);
 
         let uri = "smb://WORKGROUP;foo/bar";
@@ -2516,7 +2516,7 @@ mod tests {
         assert_eq!(config.password, None);
         assert_eq!(config.hostname, "foo");
         assert_eq!(config.port, None);
-        assert_eq!(config.share, "bar");
+        assert_eq!(config.share, Some("bar"));
         assert_eq!(config.path, None);
 
         let uri = "smb://NOSTROMO;Ellen.Ripley:100375@Mother:445/interface/special/order/937.txt";
@@ -2526,8 +2526,26 @@ mod tests {
         assert_eq!(config.password, Some("100375"));
         assert_eq!(config.hostname, "Mother");
         assert_eq!(config.port, Some(445));
-        assert_eq!(config.share, "interface");
+        assert_eq!(config.share, Some("interface"));
         assert_eq!(config.path, Some("special/order/937.txt"));
+
+        let uri = "smb://10.0.1.1/";
+        let config = resolve_smb_uri(uri).unwrap();
+
+        assert_eq!(config.domain, None);
+        assert_eq!(config.user, None);
+        assert_eq!(config.password, None);
+        assert_eq!(config.hostname, "10.0.1.1");
+        assert_eq!(config.port, None);
+        assert_eq!(config.share, None);
+        assert_eq!(config.path, None);
+
+        let uri = "smb://10.0.1.1";
+        let config = resolve_smb_uri(uri).unwrap();
+
+        assert_eq!(config.hostname, "10.0.1.1");
+        assert_eq!(config.share, None);
+        assert_eq!(config.path, None);
     }
 
     fn fake_stream(size: u64) -> super::FileStream {

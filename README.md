@@ -1,58 +1,76 @@
 # cifs-client-stream
 
-Временное рабочее README на русском языке. Проект основан на
-[`re-gmbh/cifs-client`](https://github.com/re-gmbh/cifs-client), но этот форк
-развивается как read-only SMB1 backend для будущего медиаплеера под Apple TV.
+`cifs-client-stream` is a focused Rust fork of `re-gmbh/cifs-client`, developed as a read-only SMB1-first streaming backend for the future Apple TV media player **Apex**.
 
-## Цель
+The project is intentionally not a full Samba replacement and not a generic write-capable SMB client. Its main goal is stable, predictable media playback from old SMB1/NAS-style storage, especially AirPort Extreme with an external USB HDD.
 
-Сделать стабильное и быстрое SMB1-чтение для Apple TV медиаплеера:
+## Project goals
 
-- основной сервер: AirPort Extreme с внешним HDD по USB;
-- основные клиенты: Apple TV HD 2015 на tvOS 17 и Apple TV 4K на tvOS 26;
-- основной сценарий: просмотр видео из SMB1-шары без записи на сервер;
-- важные требования: без `unsafe`, высокая скорость sequential read, понятная
-  архитектура без устаревшего лишнего кода.
+- Read-only SMB1 access for local media libraries.
+- Primary target: Apple TV media playback through Apex.
+- Primary server target: AirPort Extreme + external USB HDD.
+- Safe Rust first: no `unsafe` unless a future platform bridge absolutely requires it.
+- Sequential streaming optimized for real playback, not bulk file copying.
+- Small memory footprint and predictable buffering.
+- Clear path toward future SMB2/SMB3 backends without breaking the SMB1-first layer.
 
-SMB1 выбран осознанно, потому что AirPort Extreme и старые сетевые диски часто
-живут именно в таком режиме. Позже возможен SMB2/3 слой, но сейчас фокус на
-качественном SMB1-first backend.
+## Current status
 
-## Текущее состояние
+Implemented and tested:
 
-Уже есть:
+- SMB1 connection, negotiation, mount, unmount.
+- NTLM authentication.
+- Directory listing through `TRANS2_FIND_FIRST2` / `TRANS2_FIND_NEXT2`.
+- Read-only file open/read/close.
+- Timeout-aware operations.
+- Error classification for network, timeout, protocol, server, auth, config and internal failures.
+- Media-aware directory filtering:
+  - keeps folders, audio and video;
+  - filters subtitles and non-media files;
+  - filters hidden/system entries;
+  - sorts entries in media-friendly natural order.
+- Playback-oriented streaming layer:
+  - `SmbMediaStream`;
+  - `SmbMediaStreamOptions`;
+  - initial buffer;
+  - low watermark;
+  - prefill target;
+  - block reads;
+  - seek;
+  - stream stats.
+- Real SMB smoke test against AirPort Extreme.
 
-- подключение к SMB1-шаре;
-- NTLM-аутентификация;
-- read-only mount/list/read;
-- классификация файлов для медиатеки;
-- фильтрация скрытых файлов, субтитров и немедийных расширений;
-- сортировка директорий и файлов для быстрого UI;
-- распознавание папок-фильмов, где внутри лежит основной видеофайл;
-- bounded read-ahead для потокового чтения;
-- таймауты операций;
-- базовая классификация ошибок: timeout, network, server, auth;
-- smoke-тест для реального SMB1-чтения без Xcode/tvOS.
+The current default media stream profile is:
 
-Реальное подключение к AirPort Extreme уже проверено. Чтение файла с шары
-работает. На тесте 4K WEB-DL около 20 GB было получено примерно `3.40 MiB/s`
-на 16 блоках по `262144` байт. Это не финальная производительность, а текущая
-точка измерения.
-
-## Smoke-тест SMB1
-
-Команда для проверки листинга и чтения реального файла:
-
-```sh
-SMB_URI='smb://user:password@10.0.1.1/HARD' \
-SMB_HOST='10.0.1.1' \
-SMB_READ_PATH='/path/to/movie.mkv' \
-SMB_READ_BYTES=262144 \
-SMB_READ_BLOCKS=16 \
-cargo run --bin smb_smoke
+```text
+initial buffer: 1 MiB
+low watermark: 1 MiB
+prefill target / high watermark: 2 MiB
+read block: 256 KiB
+read-ahead capacity ceiling: 8 MiB
+SMB chunk size: 65534 bytes
 ```
 
-`SMB_URI` можно писать и без логина/пароля, если передать их отдельно:
+This profile was selected after real tests on AirPort Extreme + USB HDD. It favors frequent moderate prefill reads instead of rare large reads, because that behaves better on this storage/server combination.
+
+## What this fork intentionally does not do
+
+This fork currently does not support:
+
+- writing files to the SMB share;
+- deleting or modifying server-side files;
+- whole-file download APIs for large media;
+- SMB notify / directory change watching;
+- AV1 decoding;
+- Dolby/DTS licensing logic;
+- metadata writing back to the NAS;
+- SMB2/SMB3 yet.
+
+For Apex, the backend should read media safely and predictably. Metadata, thumbnails, playback history and cache should live in the app layer, not be written into the SMB share.
+
+## Smoke test
+
+Set the SMB URI, host, credentials and file path, then run:
 
 ```sh
 SMB_URI='smb://10.0.1.1/HARD' \
@@ -61,48 +79,81 @@ SMB_USER='user' \
 SMB_PASSWORD='password' \
 SMB_READ_PATH='/path/to/movie.mkv' \
 SMB_READ_BYTES=262144 \
-SMB_READ_BLOCKS=16 \
+SMB_READ_BLOCKS=256 \
+SMB_READ_AHEAD_BYTES=8388608 \
+SMB_CHUNK_SIZE=65534 \
+SMB_WORKER_INITIAL_BUFFER_BYTES=1048576 \
+SMB_TIMEOUT_MS=15000 \
 cargo run --bin smb_smoke
 ```
 
-Если нужен домен/workgroup:
+The selected prefill profile can be tested with:
 
 ```sh
-SMB_DOMAIN='WORKGROUP'
+SMB_URI='smb://10.0.1.1/HARD' \
+SMB_HOST='10.0.1.1' \
+SMB_USER='user' \
+SMB_PASSWORD='password' \
+SMB_READ_PATH='/path/to/movie.mkv' \
+SMB_READ_BYTES=262144 \
+SMB_READ_BLOCKS=256 \
+SMB_READ_AHEAD_BYTES=8388608 \
+SMB_CHUNK_SIZE=65534 \
+SMB_WORKER_INITIAL_BUFFER_BYTES=1048576 \
+SMB_WORKER_PREFILL_HIGH=1 \
+SMB_WORKER_PREFILL_TARGET_BYTES=2097152 \
+SMB_TIMEOUT_MS=15000 \
+cargo run --bin smb_smoke
 ```
 
-Для AirPort Extreme обычно:
-
-- `SMB_HOST='10.0.1.1'`;
-- `HARD` - имя SMB-шары, если диск в сети виден как `HARD`;
-- `SMB_READ_PATH` - путь к файлу внутри шары;
-- `SMB_READ_BLOCKS=16` - короткий sequential read тест;
-- `SMB_READ_BLOCKS=128` или больше - более честный тест стабильности.
-
-Если нужно проверить только список папки, убери `SMB_READ_PATH`.
-
-## Вывод smoke-теста
-
-При чтении файла `smb_smoke` печатает каждый блок:
+Useful smoke variables:
 
 ```text
-block 1 read 262144 bytes in 91.2ms (2.74 MiB/s) at source_position=262144 buffered=0
+SMB_URI                         SMB URI, for example smb://10.0.1.1/HARD
+SMB_HOST                        optional host override
+SMB_USER                        username
+SMB_PASSWORD                    password
+SMB_DOMAIN                      optional domain/workgroup
+SMB_READ_PATH                   file path inside the share
+SMB_READ_BYTES                  block size requested by the smoke test
+SMB_READ_BLOCKS                 number of blocks to read
+SMB_READ_AHEAD_BYTES            stream capacity ceiling
+SMB_CHUNK_SIZE                  SMB read chunk size
+SMB_WORKER_INITIAL_BUFFER_BYTES initial startup buffer
+SMB_WORKER_PREFILL_HIGH         enable prefill simulation
+SMB_WORKER_PREFILL_TARGET_BYTES prefill/high-watermark target
+SMB_PRINT_BLOCKS                print per-block diagnostics
+SMB_PRINT_ENTRIES               print directory entries
+SMB_TIMEOUT_MS                  operation timeout
 ```
 
-В конце печатается общий результат:
+## How to read smoke output
+
+Important lines:
 
 ```text
-read 4194304 bytes from /dir/movie.mkv in 1.17s (3.40 MiB/s), slowest block 98ms
-block latency: p95 96ms, p99 98ms
+initial worker buffer: ...
+read ...
+refill blocks: ...
+cached blocks: ...
+block latency: ...
+prefill events: ...
+total including initial buffer: ...
 ```
 
-Смотреть нужно не только на среднюю скорость, но и на хвост задержек:
-`slowest`, `p95` и `p99`. Для стриминга важна стабильность: редкие сильные
-просадки хуже, чем просто средняя скорость ниже ожидаемой.
+Interpretation:
 
-## Локальная проверка без SMB
+- `initial worker buffer` measures startup buffering. If an external HDD is asleep, this may take several seconds. That is expected for AirPort Extreme + USB HDD.
+- `cached blocks` should be high for smooth playback.
+- `block latency` reflects how fast the playback-facing read path returns data.
+- `prefill events` show network/storage reads done to refill the buffer.
+- `total including initial buffer` includes startup delay.
 
-Перед коммитом достаточно:
+A cold HDD wake-up can make the first buffer slow. This is not necessarily a stream algorithm problem. In Apex UI this should be presented as startup buffering / disk wake-up.
+
+## Local checks
+
+Run before committing:
 
 ```sh
 cargo fmt
@@ -111,32 +162,64 @@ cargo clippy --all-targets --all-features
 cargo test
 ```
 
-`cargo fmt --check` не нужен в этом рабочем процессе: форматируем сразу.
+## Architecture
 
-## Важные ограничения
+High-level layering:
 
-- Проект должен оставаться без `unsafe`, если задачу можно решить безопасным Rust.
-- Пишем маленькими шагами, но несколько связанных микрошагов можно делать одним
-  коммитом.
-- Для медиаплеера серверная запись сейчас не нужна. Метаданные, обложки,
-  кэш и синхронизацию лучше проектировать отдельно, не через запись в SMB-шару.
-- Не надо хранить в памяти историю всех пройденных папок и просмотренных видео.
-  UI должен освобождать старые списки при переходах, чтобы не копить память.
-- `.gitignore`-файлы без явной причины не читать и не трогать.
+```text
+Cifs
+  ├─ SMB1 session / mount / list / read
+  ├─ DirectoryReader
+  └─ SmbMediaStream
+       └─ StreamingWorker
+            └─ StreamingBuffer
+```
 
-## Ближайший план
+`StreamingWorker` is the low-level buffering mechanism.
 
-1. Довести streaming read: подобрать chunk/read-ahead стратегию под AirPort
-   Extreme и USB-диск.
-2. Довести длинные smoke-тесты до режима сравнения разных размеров блока и
-   read-ahead настроек.
-3. Подготовить API, который позже удобно вызвать из Swift/SwiftUI через FFI.
-4. Отделить SMB backend от будущей медиатеки и UI.
-5. Позже спроектировать SMB2/3 как отдельный backend, не ломая SMB1-first слой.
+`SmbMediaStream` is the playback-oriented layer intended to evolve toward Apex and eventually FFI/Swift integration.
 
-## Ожидания по 4K
+## Why SMB1 first
 
-4K WEB-DL около 20 GB потенциально реалистичнее, чем 4K remux. Для стабильного
-просмотра важно не только среднее `MiB/s`, но и отсутствие длинных пауз. Текущий
-результат уже доказывает рабочее чтение, но для уровня медиаплеера нужно ещё
-доработать буферизацию, измерения и интеграционный API.
+AirPort Extreme and many older NAS-like devices still expose SMB1. Apex needs to support this class of local home media setups cleanly.
+
+SMB2/SMB3 should be added later as a separate backend/layer, not by breaking the SMB1 implementation.
+
+## Roadmap
+
+Near-term:
+
+1. Finish cleanup around the selected `SmbMediaStream` path.
+2. Remove remaining obsolete diagnostics and old public entry points.
+3. Update smoke output after the final cleanup.
+4. Add longer real-world stability tests.
+5. Design an Apex-facing Rust API that can later be bridged to Swift.
+
+Medium-term:
+
+1. Add a background refill model.
+2. Add a session/actor abstraction around SMB access.
+3. Prepare FFI-friendly handles for Apex.
+4. Integrate with Apple TV/tvOS app code.
+5. Add seek/range behavior suitable for AVPlayer.
+
+Long-term:
+
+1. SMB2/SMB3 backend.
+2. macOS/iPadOS/iOS clients sharing the same core.
+3. Better metadata and artwork integration in the app layer.
+4. Optional library index/cache outside the SMB share.
+
+## Apex philosophy
+
+Apex should be:
+
+- free and open-source;
+- local-first;
+- privacy-friendly;
+- no telemetry by default;
+- no subscription for accessing the user's own media;
+- honest about codec/platform limitations;
+- focused on stable playback rather than claiming support for every format.
+
+The backend should stay conservative and robust. Unsupported formats should fail clearly rather than pretending to support everything.

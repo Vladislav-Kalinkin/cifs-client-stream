@@ -68,7 +68,22 @@ async fn run() -> Result<(), Error> {
     let auth = auth_user.map(|user| Auth::new(user, "CIFSCLIENT", auth_domain, auth_password));
 
     let mut cifs = Cifs::open_timeout(connect_host, config.port, auth, timeout).await?;
-    let mount_path = format!("\\\\{}\\{}", connect_host, config.share);
+
+    let Some(share_name) = config.share else {
+        println!("connected to \\\\{connect_host}");
+        if connect_host != config.hostname {
+            println!(
+                "resolved uri host {} via SMB_HOST {connect_host}",
+                config.hostname
+            );
+        }
+        println!("server root URI detected: smb://{}/", config.hostname);
+        println!("share discovery is not implemented yet");
+        println!("next step: add SMB1 share listing and show shares as virtual Volumes");
+        return Ok(());
+    };
+
+    let mount_path = format!("\\\\{}\\{}", connect_host, share_name);
     let share = cifs.mount(&mount_path).await?;
 
     let pattern = match config.path {

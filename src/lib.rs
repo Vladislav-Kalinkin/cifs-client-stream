@@ -423,7 +423,10 @@ impl ReadAhead {
             return Ok(None);
         }
 
-        self.fill_to(cifs, max_len).await?;
+        if self.buffered < max_len && !self.eof {
+            self.fill_to(cifs, self.options.read_ahead_capacity).await?;
+        }
+
         Ok(self.pop_block(max_len))
     }
 

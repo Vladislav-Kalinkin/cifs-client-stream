@@ -1,27 +1,20 @@
-# cifs-client-stream smoke test report
+cifs-client-stream smoke test report
 
-Copy this template, fill it in, and attach the full `smb_smoke` output.
+Do not include real passwords, public IP addresses, private personal details,
+or anything you do not want to share publicly.
 
-## Tester
-
-```text
+REPORT
 Date:
 Report label, optional:
-```
 
-## Client machine
-
-```text
+CLIENT MACHINE
 OS:
 CPU:
 RAM:
 Rust version:
-Wired Ethernet / Wi-Fi:
-```
+Network: wired Ethernet / Wi-Fi
 
-## SMB server
-
-```text
+SMB SERVER
 Device / server:
 SMB implementation, if known:
 SMB version, if known:
@@ -30,11 +23,8 @@ Firmware version:
 Disk type: HDD / SSD / unknown
 Disk connection: USB2 / USB3 / SATA / unknown
 Filesystem, if known:
-```
 
-## Test type
-
-```text
+TEST TYPE
 [ ] Root listing
 [ ] Nested listing
 [ ] Movie-folder scan
@@ -42,34 +32,18 @@ Filesystem, if known:
 [ ] Sequential read 2048 blocks
 [ ] Pipeline comparison
 [ ] Non-AirPort Large ReadX experiment
-```
 
-## Command used
-
+COMMAND USED
 Paste the exact command, but remove or replace the real password.
 
-```sh
-SMB_HOST='...' \
-SMB_SHARE='...' \
-SMB_USER='...' \
-SMB_PASSWORD='REDACTED' \
-...
-cargo run --bin smb_smoke
-```
-
-## File tested
-
-```text
+FILE TESTED
 Path:
 Container: mkv / mp4 / mov / other
 Approx size:
 Video type, if known:
 Non-English path characters: yes / no
-```
 
-## Summary results
-
-```text
+SUMMARY RESULTS
 configured_chunk_size:
 effective_chunk_size:
 pipeline_depth:
@@ -84,21 +58,14 @@ slowest block:
 internal read calls:
 internal avg_size:
 errors/timeouts:
-```
 
-## Full output
+FULL OUTPUT
+Paste full smb_smoke output here.
 
-```text
-paste full smb_smoke output here
-```
-
-## Notes
-
-```text
+NOTES
 Was the disk asleep before the test?
 Did the first run differ from the second?
 Any disconnects?
 Any strange filenames?
 Any folder that was misclassified?
 Any playback-relevant concern?
-```

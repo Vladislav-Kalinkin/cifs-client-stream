@@ -23,7 +23,7 @@ Completed:
 
 - Keep README current.
 - Add `docs/SMOKE_TESTING.md`.
-- Add `docs/TEST_REPORT_TEMPLATE.md`.
+- Add `docs/TEST_REPORT_TEMPLATE.txt`.
 - Add `docs/ARCHITECTURE.md`.
 - Add `docs/ROADMAP.md`.
 

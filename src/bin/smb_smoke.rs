@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use cifs_client::{
     media_presentations, resolve_smb_uri, Auth, Cifs, Error, MediaPresentation, StreamOptions,
+    StreamingWorkerOptions,
 };
 
 const DEFAULT_READ_BYTES: usize = 256 * 1024;
@@ -48,6 +49,7 @@ async fn run() -> Result<(), Error> {
     );
     let chunk_size = env_u16("SMB_CHUNK_SIZE", default_stream_options.chunk_size);
     let stream_options = StreamOptions::new(read_ahead_bytes, chunk_size)?;
+    let use_streaming_worker = env_bool("SMB_STREAMING_WORKER", false);
 
     let timeout = Duration::from_millis(timeout);
 
@@ -69,6 +71,7 @@ async fn run() -> Result<(), Error> {
         Some(path) if !path.is_empty() => format!("{path}/*"),
         _ => "*".to_owned(),
     };
+
     let mut reader = cifs
         .open_dir_reader_timeout(&share, &pattern, timeout)
         .await?;
@@ -103,127 +106,285 @@ async fn run() -> Result<(), Error> {
 
     if let Some(path) = read_path {
         println!(
-            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} chunk_size={}",
-            read_bytes, read_blocks, stream_options.read_ahead_capacity, stream_options.chunk_size
+            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} chunk_size={} mode={}",
+            read_bytes,
+            read_blocks,
+            stream_options.read_ahead_capacity,
+            stream_options.chunk_size,
+            if use_streaming_worker {
+                "streaming-worker"
+            } else {
+                "read-ahead"
+            }
         );
 
-        let mut stream = cifs
-            .open_read_ahead_with_options(&share, &path, stream_options)
-            .await?;
-        let started = Instant::now();
-        let mut total = 0usize;
-        let mut slowest = Duration::ZERO;
-        let mut block_times = Vec::with_capacity(read_blocks);
-        let mut refill_times = Vec::new();
-        let mut cached_times = Vec::new();
-        let mut refill_bytes = 0usize;
-        let mut cached_bytes = 0usize;
+        if use_streaming_worker {
+            let low_watermark = env_usize(
+                "SMB_LOW_WATERMARK_BYTES",
+                stream_options.read_ahead_capacity / 4,
+            );
+            let high_watermark = env_usize(
+                "SMB_HIGH_WATERMARK_BYTES",
+                stream_options.read_ahead_capacity,
+            );
+            let worker_options = StreamingWorkerOptions::new(
+                stream_options,
+                low_watermark,
+                high_watermark,
+                read_bytes,
+            )?;
 
-        for block_index in 0..read_blocks {
-            let before = stream.stats();
-            let block_started = Instant::now();
-            let block = stream
-                .read_block_timeout(&mut cifs, read_bytes, timeout)
-                .await?
-                .unwrap_or_default();
-            let block_elapsed = block_started.elapsed();
-            let after = stream.stats();
+            println!(
+                "worker options: low_watermark={} high_watermark={} read_request_size={}",
+                worker_options.low_watermark,
+                worker_options.high_watermark,
+                worker_options.read_request_size
+            );
 
-            if block.is_empty() {
-                println!("reached EOF after {} blocks", block_index);
-                break;
+            let mut worker = cifs
+                .open_streaming_worker_with_options(&share, &path, worker_options)
+                .await?;
+
+            let started = Instant::now();
+            let mut total = 0usize;
+            let mut slowest = Duration::ZERO;
+            let mut block_times = Vec::with_capacity(read_blocks);
+            let mut refill_times = Vec::new();
+            let mut cached_times = Vec::new();
+            let mut refill_bytes = 0usize;
+            let mut cached_bytes = 0usize;
+
+            for block_index in 0..read_blocks {
+                let before = worker.stats();
+                let block_started = Instant::now();
+                let block = worker
+                    .read_block_timeout(&mut cifs, read_bytes, timeout)
+                    .await?
+                    .unwrap_or_default();
+                let block_elapsed = block_started.elapsed();
+                let after = worker.stats();
+
+                if block.is_empty() {
+                    println!("reached EOF after {} blocks", block_index);
+                    break;
+                }
+
+                total += block.len();
+                slowest = slowest.max(block_elapsed);
+                block_times.push(block_elapsed);
+
+                let source_delta =
+                    after.source_position.saturating_sub(before.source_position) as usize;
+
+                if source_delta > 0 {
+                    refill_times.push(block_elapsed);
+                    refill_bytes += source_delta;
+                } else {
+                    cached_times.push(block_elapsed);
+                    cached_bytes += block.len();
+                }
+
+                let block_mbps = if block_elapsed.is_zero() {
+                    0.0
+                } else {
+                    (block.len() as f64 / (1024.0 * 1024.0)) / block_elapsed.as_secs_f64()
+                };
+
+                println!(
+                    concat!(
+                        "block {} read {} bytes in {:?} ({:.2} MiB/s) ",
+                        "playback {}->{} source {}->{} source_delta={} ",
+                        "prefetched={} buffered={} chunks={} remaining={}"
+                    ),
+                    block_index + 1,
+                    block.len(),
+                    block_elapsed,
+                    block_mbps,
+                    before.playback_position,
+                    after.playback_position,
+                    before.source_position,
+                    after.source_position,
+                    source_delta,
+                    after.prefetched(),
+                    after.buffered,
+                    after.buffered_chunks,
+                    after.remaining()
+                );
             }
 
-            total += block.len();
-            slowest = slowest.max(block_elapsed);
-            block_times.push(block_elapsed);
-            let source_delta =
-                after.source_position.saturating_sub(before.source_position) as usize;
-
-            if source_delta > 0 {
-                refill_times.push(block_elapsed);
-                refill_bytes += source_delta;
-            } else {
-                cached_times.push(block_elapsed);
-                cached_bytes += block.len();
-            }
-
-            let block_mbps = if block_elapsed.is_zero() {
+            let elapsed = started.elapsed();
+            let mbps = if elapsed.is_zero() {
                 0.0
             } else {
-                (block.len() as f64 / (1024.0 * 1024.0)) / block_elapsed.as_secs_f64()
+                (total as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
             };
 
             println!(
-                concat!(
-                    "block {} read {} bytes in {:?} ({:.2} MiB/s) ",
-                    "playback {}->{} source {}->{} source_delta={} ",
-                    "prefetched={} buffered={} chunks={} remaining={}"
-                ),
-                block_index + 1,
-                block.len(),
-                block_elapsed,
-                block_mbps,
-                before.position,
-                after.position,
-                before.source_position,
-                after.source_position,
-                source_delta,
-                after.prefetched(),
-                after.buffered,
-                after.buffered_chunks,
-                after.remaining()
+                "read {} bytes from {} in {:?} ({:.2} MiB/s), slowest block {:?}",
+                total, path, elapsed, mbps, slowest
             );
-        }
 
-        let elapsed = started.elapsed();
-        let mbps = if elapsed.is_zero() {
-            0.0
+            if !refill_times.is_empty() {
+                let refill_elapsed: Duration = refill_times.iter().copied().sum();
+                let refill_mbps = if refill_elapsed.is_zero() {
+                    0.0
+                } else {
+                    (refill_bytes as f64 / (1024.0 * 1024.0)) / refill_elapsed.as_secs_f64()
+                };
+
+                println!(
+                    "refill blocks: {} source bytes {} in {:?} ({:.2} MiB/s), p95 {:?}, p99 {:?}",
+                    refill_times.len(),
+                    refill_bytes,
+                    refill_elapsed,
+                    refill_mbps,
+                    percentile_duration(&mut refill_times, 95),
+                    percentile_duration(&mut refill_times, 99)
+                );
+            }
+
+            if !cached_times.is_empty() {
+                println!(
+                    "cached blocks: {} delivered bytes {}, p95 {:?}, p99 {:?}",
+                    cached_times.len(),
+                    cached_bytes,
+                    percentile_duration(&mut cached_times, 95),
+                    percentile_duration(&mut cached_times, 99)
+                );
+            }
+
+            if !block_times.is_empty() {
+                println!(
+                    "block latency: p95 {:?}, p99 {:?}",
+                    percentile_duration(&mut block_times, 95),
+                    percentile_duration(&mut block_times, 99)
+                );
+            }
+
+            cifs.close_streaming_worker(worker).await?;
         } else {
-            (total as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
-        };
-        println!(
-            "read {} bytes from {} in {:?} ({:.2} MiB/s), slowest block {:?}",
-            total, path, elapsed, mbps, slowest
-        );
+            let mut stream = cifs
+                .open_read_ahead_with_options(&share, &path, stream_options)
+                .await?;
 
-        if !refill_times.is_empty() {
-            let refill_elapsed: Duration = refill_times.iter().copied().sum();
-            let refill_mbps = if refill_elapsed.is_zero() {
+            let started = Instant::now();
+            let mut total = 0usize;
+            let mut slowest = Duration::ZERO;
+            let mut block_times = Vec::with_capacity(read_blocks);
+            let mut refill_times = Vec::new();
+            let mut cached_times = Vec::new();
+            let mut refill_bytes = 0usize;
+            let mut cached_bytes = 0usize;
+
+            for block_index in 0..read_blocks {
+                let before = stream.stats();
+                let block_started = Instant::now();
+                let block = stream
+                    .read_block_timeout(&mut cifs, read_bytes, timeout)
+                    .await?
+                    .unwrap_or_default();
+                let block_elapsed = block_started.elapsed();
+                let after = stream.stats();
+
+                if block.is_empty() {
+                    println!("reached EOF after {} blocks", block_index);
+                    break;
+                }
+
+                total += block.len();
+                slowest = slowest.max(block_elapsed);
+                block_times.push(block_elapsed);
+
+                let source_delta =
+                    after.source_position.saturating_sub(before.source_position) as usize;
+
+                if source_delta > 0 {
+                    refill_times.push(block_elapsed);
+                    refill_bytes += source_delta;
+                } else {
+                    cached_times.push(block_elapsed);
+                    cached_bytes += block.len();
+                }
+
+                let block_mbps = if block_elapsed.is_zero() {
+                    0.0
+                } else {
+                    (block.len() as f64 / (1024.0 * 1024.0)) / block_elapsed.as_secs_f64()
+                };
+
+                println!(
+                    concat!(
+                        "block {} read {} bytes in {:?} ({:.2} MiB/s) ",
+                        "playback {}->{} source {}->{} source_delta={} ",
+                        "prefetched={} buffered={} chunks={} remaining={}"
+                    ),
+                    block_index + 1,
+                    block.len(),
+                    block_elapsed,
+                    block_mbps,
+                    before.position,
+                    after.position,
+                    before.source_position,
+                    after.source_position,
+                    source_delta,
+                    after.prefetched(),
+                    after.buffered,
+                    after.buffered_chunks,
+                    after.remaining()
+                );
+            }
+
+            let elapsed = started.elapsed();
+            let mbps = if elapsed.is_zero() {
                 0.0
             } else {
-                (refill_bytes as f64 / (1024.0 * 1024.0)) / refill_elapsed.as_secs_f64()
+                (total as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
             };
 
             println!(
-                "refill blocks: {} source bytes {} in {:?} ({:.2} MiB/s), p95 {:?}, p99 {:?}",
-                refill_times.len(),
-                refill_bytes,
-                refill_elapsed,
-                refill_mbps,
-                percentile_duration(&mut refill_times, 95),
-                percentile_duration(&mut refill_times, 99)
+                "read {} bytes from {} in {:?} ({:.2} MiB/s), slowest block {:?}",
+                total, path, elapsed, mbps, slowest
             );
-        }
 
-        if !cached_times.is_empty() {
-            println!(
-                "cached blocks: {} delivered bytes {}, p95 {:?}, p99 {:?}",
-                cached_times.len(),
-                cached_bytes,
-                percentile_duration(&mut cached_times, 95),
-                percentile_duration(&mut cached_times, 99)
-            );
-        }
+            if !refill_times.is_empty() {
+                let refill_elapsed: Duration = refill_times.iter().copied().sum();
+                let refill_mbps = if refill_elapsed.is_zero() {
+                    0.0
+                } else {
+                    (refill_bytes as f64 / (1024.0 * 1024.0)) / refill_elapsed.as_secs_f64()
+                };
 
-        if !block_times.is_empty() {
-            println!(
-                "block latency: p95 {:?}, p99 {:?}",
-                percentile_duration(&mut block_times, 95),
-                percentile_duration(&mut block_times, 99)
-            );
+                println!(
+                    "refill blocks: {} source bytes {} in {:?} ({:.2} MiB/s), p95 {:?}, p99 {:?}",
+                    refill_times.len(),
+                    refill_bytes,
+                    refill_elapsed,
+                    refill_mbps,
+                    percentile_duration(&mut refill_times, 95),
+                    percentile_duration(&mut refill_times, 99)
+                );
+            }
+
+            if !cached_times.is_empty() {
+                println!(
+                    "cached blocks: {} delivered bytes {}, p95 {:?}, p99 {:?}",
+                    cached_times.len(),
+                    cached_bytes,
+                    percentile_duration(&mut cached_times, 95),
+                    percentile_duration(&mut cached_times, 99)
+                );
+            }
+
+            if !block_times.is_empty() {
+                println!(
+                    "block latency: p95 {:?}, p99 {:?}",
+                    percentile_duration(&mut block_times, 95),
+                    percentile_duration(&mut block_times, 99)
+                );
+            }
+
+            cifs.close_read_ahead(stream).await?;
         }
-        cifs.close_read_ahead(stream).await?;
     }
 
     cifs.umount(share).await?;
@@ -248,6 +409,17 @@ fn env_u16(name: &str, default: u16) -> u16 {
     env::var(name)
         .ok()
         .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    env::var(name)
+        .ok()
+        .and_then(|value| match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
         .unwrap_or(default)
 }
 

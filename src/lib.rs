@@ -613,6 +613,41 @@ impl StreamingWorker {
 
         Ok(true)
     }
+
+    pub async fn fill_once_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        timeout: Duration,
+    ) -> Result<bool, Error> {
+        with_timeout(timeout, self.fill_once(cifs)).await
+    }
+
+    pub async fn read_block(
+        &mut self,
+        cifs: &mut Cifs,
+        max_len: usize,
+    ) -> Result<Option<Bytes>, Error> {
+        if max_len == 0 {
+            return Ok(None);
+        }
+
+        while self.state.buffered_len() < max_len && !self.state.is_finished() {
+            if !self.fill_once(cifs).await? {
+                break;
+            }
+        }
+
+        Ok(self.read_available(max_len))
+    }
+
+    pub async fn read_block_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        max_len: usize,
+        timeout: Duration,
+    ) -> Result<Option<Bytes>, Error> {
+        with_timeout(timeout, self.read_block(cifs, max_len)).await
+    }
 }
 
 impl FileStream {

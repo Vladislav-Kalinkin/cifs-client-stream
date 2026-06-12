@@ -275,6 +275,85 @@ impl StreamingWorkerOptions {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct StreamingBuffer {
+    chunks: VecDeque<Bytes>,
+    buffered: usize,
+}
+
+impl StreamingBuffer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn buffered_len(&self) -> usize {
+        self.buffered
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffered == 0
+    }
+
+    pub fn clear(&mut self) {
+        self.chunks.clear();
+        self.buffered = 0;
+    }
+
+    pub fn push(&mut self, chunk: Bytes) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        self.buffered += chunk.len();
+        self.chunks.push_back(chunk);
+    }
+
+    pub fn pop_bytes(&mut self, max_len: usize) -> Option<Bytes> {
+        if max_len == 0 {
+            return None;
+        }
+
+        let mut chunk = self.chunks.pop_front()?;
+        if chunk.len() > max_len {
+            let out = chunk.split_to(max_len);
+            self.buffered -= out.len();
+            self.chunks.push_front(chunk);
+            return Some(out);
+        }
+
+        self.buffered -= chunk.len();
+        Some(chunk)
+    }
+
+    pub fn pop_block(&mut self, max_len: usize) -> Option<Bytes> {
+        if max_len == 0 {
+            return None;
+        }
+
+        let first = self.pop_bytes(max_len)?;
+        if first.len() == max_len || self.chunks.is_empty() {
+            return Some(first);
+        }
+
+        let capacity = max_len.min(first.len().saturating_add(self.buffered));
+        let mut out = BytesMut::with_capacity(capacity);
+        out.extend_from_slice(&first);
+
+        while out.len() < max_len {
+            let Some(chunk) = self.pop_bytes(max_len - out.len()) else {
+                break;
+            };
+            out.extend_from_slice(&chunk);
+        }
+
+        Some(out.freeze())
+    }
+}
+
 impl FileStream {
     pub fn new(handle: Handle) -> Self {
         Self {
@@ -1528,7 +1607,8 @@ mod tests {
         is_likely_extra_video, is_media_entry, main_video_index, media_presentations,
         media_presentations_with_summaries, read_count_for, resolve_smb_uri, retain_media_entries,
         seek_position, sort_dir_entries, MediaEntry, MediaFolderSummary, MediaKind,
-        MediaPresentation, ReadAhead, StreamOptions, StreamingWorkerOptions, SMB_READ_MAX,
+        MediaPresentation, ReadAhead, StreamOptions, StreamingBuffer, StreamingWorkerOptions,
+        SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -2117,5 +2197,73 @@ mod tests {
             .iter()
             .map(|entry| entry.filename.as_str())
             .collect()
+    }
+
+    #[test]
+    fn streaming_buffer_tracks_bytes_and_chunks() {
+        let mut buffer = StreamingBuffer::new();
+
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.buffered_len(), 0);
+        assert_eq!(buffer.chunk_count(), 0);
+
+        buffer.push(Bytes::from_static(b"abcd"));
+        buffer.push(Bytes::from_static(b"ef"));
+
+        assert!(!buffer.is_empty());
+        assert_eq!(buffer.buffered_len(), 6);
+        assert_eq!(buffer.chunk_count(), 2);
+    }
+
+    #[test]
+    fn streaming_buffer_pop_bytes_splits_front_chunk() {
+        let mut buffer = StreamingBuffer::new();
+
+        buffer.push(Bytes::from_static(b"abcdef"));
+
+        assert_eq!(buffer.pop_bytes(2).unwrap().as_ref(), b"ab");
+        assert_eq!(buffer.buffered_len(), 4);
+        assert_eq!(buffer.chunk_count(), 1);
+
+        assert_eq!(buffer.pop_bytes(10).unwrap().as_ref(), b"cdef");
+        assert_eq!(buffer.buffered_len(), 0);
+        assert_eq!(buffer.chunk_count(), 0);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn streaming_buffer_pop_block_combines_chunks() {
+        let mut buffer = StreamingBuffer::new();
+
+        buffer.push(Bytes::from_static(b"ab"));
+        buffer.push(Bytes::from_static(b"cdef"));
+        buffer.push(Bytes::from_static(b"gh"));
+
+        assert_eq!(buffer.pop_block(5).unwrap().as_ref(), b"abcde");
+        assert_eq!(buffer.buffered_len(), 3);
+        assert_eq!(buffer.chunk_count(), 2);
+
+        assert_eq!(buffer.pop_block(10).unwrap().as_ref(), b"fgh");
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn streaming_buffer_ignores_empty_chunks_and_clears() {
+        let mut buffer = StreamingBuffer::new();
+
+        buffer.push(Bytes::new());
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.chunk_count(), 0);
+
+        buffer.push(Bytes::from_static(b"abc"));
+        buffer.push(Bytes::from_static(b"def"));
+        assert_eq!(buffer.buffered_len(), 6);
+
+        buffer.clear();
+
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.buffered_len(), 0);
+        assert_eq!(buffer.chunk_count(), 0);
+        assert_eq!(buffer.pop_bytes(1), None);
     }
 }

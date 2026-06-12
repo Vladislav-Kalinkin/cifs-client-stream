@@ -207,6 +207,74 @@ impl StreamOptions {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamingWorkerOptions {
+    pub stream_options: StreamOptions,
+    pub low_watermark: usize,
+    pub high_watermark: usize,
+    pub read_request_size: usize,
+}
+
+impl Default for StreamingWorkerOptions {
+    fn default() -> Self {
+        let stream_options = StreamOptions::default();
+        Self {
+            stream_options,
+            low_watermark: stream_options.read_ahead_capacity / 4,
+            high_watermark: stream_options.read_ahead_capacity,
+            read_request_size: 256 * 1024,
+        }
+    }
+}
+
+impl StreamingWorkerOptions {
+    pub fn new(
+        stream_options: StreamOptions,
+        low_watermark: usize,
+        high_watermark: usize,
+        read_request_size: usize,
+    ) -> Result<Self, Error> {
+        let options = Self {
+            stream_options,
+            low_watermark,
+            high_watermark,
+            read_request_size,
+        };
+        options.validate()?;
+        Ok(options)
+    }
+
+    pub fn validate(&self) -> Result<(), Error> {
+        self.stream_options.validate()?;
+
+        if self.read_request_size == 0 {
+            return Err(Error::InvalidConfig(
+                "streaming worker read request size must be greater than zero".to_owned(),
+            ));
+        }
+
+        if self.high_watermark == 0 {
+            return Err(Error::InvalidConfig(
+                "streaming worker high watermark must be greater than zero".to_owned(),
+            ));
+        }
+
+        if self.low_watermark > self.high_watermark {
+            return Err(Error::InvalidConfig(
+                "streaming worker low watermark must not exceed high watermark".to_owned(),
+            ));
+        }
+
+        if self.high_watermark > self.stream_options.read_ahead_capacity {
+            return Err(Error::InvalidConfig(
+                "streaming worker high watermark must not exceed read-ahead capacity".to_owned(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 impl FileStream {
     pub fn new(handle: Handle) -> Self {
         Self {
@@ -1460,7 +1528,7 @@ mod tests {
         is_likely_extra_video, is_media_entry, main_video_index, media_presentations,
         media_presentations_with_summaries, read_count_for, resolve_smb_uri, retain_media_entries,
         seek_position, sort_dir_entries, MediaEntry, MediaFolderSummary, MediaKind,
-        MediaPresentation, ReadAhead, StreamOptions, SMB_READ_MAX,
+        MediaPresentation, ReadAhead, StreamOptions, StreamingWorkerOptions, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -1504,6 +1572,58 @@ mod tests {
         .unwrap();
 
         assert_eq!(buffer.next_read_count(), SMB_READ_MAX);
+    }
+
+    #[test]
+    fn streaming_worker_options_have_safe_defaults() {
+        let options = StreamingWorkerOptions::default();
+
+        assert_eq!(options.stream_options, StreamOptions::default());
+        assert_eq!(
+            options.low_watermark,
+            options.stream_options.read_ahead_capacity / 4
+        );
+        assert_eq!(
+            options.high_watermark,
+            options.stream_options.read_ahead_capacity
+        );
+        assert_eq!(options.read_request_size, 256 * 1024);
+        assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn streaming_worker_options_reject_invalid_watermarks() {
+        let stream_options = StreamOptions::default();
+
+        assert!(StreamingWorkerOptions::new(
+            stream_options,
+            stream_options.read_ahead_capacity + 1,
+            stream_options.read_ahead_capacity,
+            256 * 1024,
+        )
+        .is_err());
+
+        assert!(StreamingWorkerOptions::new(
+            stream_options,
+            0,
+            stream_options.read_ahead_capacity + 1,
+            256 * 1024,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn streaming_worker_options_reject_zero_sizes() {
+        let stream_options = StreamOptions::default();
+
+        assert!(StreamingWorkerOptions::new(stream_options, 0, 0, 256 * 1024).is_err());
+        assert!(StreamingWorkerOptions::new(
+            stream_options,
+            0,
+            stream_options.read_ahead_capacity,
+            0,
+        )
+        .is_err());
     }
 
     #[test]

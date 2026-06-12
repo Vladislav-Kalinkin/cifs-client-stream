@@ -4,25 +4,56 @@ cifs-client-stream is a focused fork of the Rust cifs-client project.
 
 Original upstream project:
 cifs-client / cifs
+
+Original upstream authors:
 Copyright 2022 Philipp Lay
 Copyright 2022 Marcus Ilgner
-Original license: MIT
+
+Original upstream license:
+MIT
 
 This fork:
 cifs-client-stream
+
+Fork author:
 Copyright 2026 Vladislav Kalinkin
 
-The fork substantially changes the project direction toward a read-only
-SMB1-first media streaming backend for legacy local storage and the future
-Apex media player project.
+Repository:
+https://github.com/Vladislav-Kalinkin/cifs-client-stream
+
+The fork changes the project direction toward a read-only SMB1-first media
+streaming backend for legacy local storage and the future Apex media player
+project.
+
+This repository contains a combination of original MIT-licensed upstream code
+and subsequent modifications by Vladislav Kalinkin.
 
 Original upstream MIT-licensed portions remain subject to the original MIT
 license. The original MIT license text is preserved in:
 
 LICENSES/MIT-ORIGINAL.txt
 
-New modifications, documentation, tests, smoke tooling, media classification
-logic, streaming changes, project-specific architecture, and other original
-work added by Vladislav Kalinkin are licensed under the project license in:
+New modifications, documentation, tests, smoke-test tooling, media
+classification logic, streaming changes, project-specific architecture, and
+other original work added by Vladislav Kalinkin are licensed under the project
+license in:
 
 LICENSE
+
+This project is source-available, not OSI-approved open source. The source code
+may be viewed, studied, tested, and modified for personal, educational,
+research, evaluation, and other non-commercial purposes, subject to the project
+license.
+
+Commercial use, commercial distribution, integration into a paid product or
+service, or hosted commercial use requires separate written permission from
+Vladislav Kalinkin.
+
+SMB1 security notice:
+SMB1 is a legacy protocol. This project is intended for trusted local
+networks and legacy local media storage. Do not expose SMB1 shares to the
+public internet.
+
+No endorsement:
+Use of upstream names, author names, project names, or repository references
+does not imply endorsement by the original upstream authors or by Vladislav Kalinkin.

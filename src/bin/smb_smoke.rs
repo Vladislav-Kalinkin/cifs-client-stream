@@ -69,7 +69,14 @@ async fn run() -> Result<(), Error> {
 
     let mut cifs = Cifs::open_timeout(connect_host, config.port, auth, timeout).await?;
 
-    let Some(share_name) = config.share else {
+    let share_name = config
+        .share
+        .map(ToOwned::to_owned)
+        .or_else(|| env::var("SMB_SHARE").ok())
+        .or_else(|| env::var("SMB_VOLUME_NAME").ok())
+        .or_else(|| env::var("SMB_DISK_NAME").ok());
+
+    let Some(share_name) = share_name else {
         println!("connected to \\\\{connect_host}");
         if connect_host != config.hostname {
             println!(
@@ -78,27 +85,15 @@ async fn run() -> Result<(), Error> {
             );
         }
         println!("server root URI detected: smb://{}/", config.hostname);
-        match cifs.list_shares().await {
-            Ok(shares) => {
-                println!("shares:");
-                for share in shares {
-                    println!(
-                        "- {} kind={:?} browsable={} comment={}",
-                        share.name,
-                        share.kind,
-                        share.kind.is_browsable_volume(),
-                        share.comment
-                    );
-                }
-            }
-            Err(error) => {
-                println!("share discovery failed: {error}");
-                println!("next step: implement SMB1 RAP NetShareEnum over IPC$");
-            }
-        }
-
+        println!("SMB share name is required for this server");
+        println!("set SMB_SHARE, for example: SMB_SHARE='HARD'");
         return Ok(());
     };
+
+    if config.share.is_none() {
+        println!("server root URI detected: smb://{}/", config.hostname);
+        println!("using SMB share from environment: {share_name}");
+    }
 
     let mount_path = format!("\\\\{}\\{}", connect_host, share_name);
     let share = cifs.mount(&mount_path).await?;

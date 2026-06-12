@@ -1,0 +1,28 @@
+cifs-client-stream Notice
+
+cifs-client-stream is a focused fork of the Rust cifs-client project.
+
+Original upstream project:
+cifs-client / cifs
+Copyright 2022 Philipp Lay
+Copyright 2022 Marcus Ilgner
+Original license: MIT
+
+This fork:
+cifs-client-stream
+Copyright 2026 Vladislav Kalinkin
+
+The fork substantially changes the project direction toward a read-only
+SMB1-first media streaming backend for legacy local storage and the future
+Apex media player project.
+
+Original upstream MIT-licensed portions remain subject to the original MIT
+license. The original MIT license text is preserved in:
+
+LICENSES/MIT-ORIGINAL.txt
+
+New modifications, documentation, tests, smoke tooling, media classification
+logic, streaming changes, project-specific architecture, and other original
+work added by Vladislav Kalinkin are licensed under the project license in:
+
+LICENSE

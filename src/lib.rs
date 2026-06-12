@@ -354,6 +354,176 @@ impl StreamingBuffer {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamingWorkerStats {
+    pub playback_position: u64,
+    pub source_position: u64,
+    pub file_size: u64,
+    pub buffered: usize,
+    pub buffered_chunks: usize,
+    pub low_watermark: usize,
+    pub high_watermark: usize,
+    pub read_request_size: usize,
+    pub source_eof: bool,
+}
+
+impl StreamingWorkerStats {
+    pub fn remaining(&self) -> u64 {
+        self.file_size.saturating_sub(self.playback_position)
+    }
+
+    pub fn prefetched(&self) -> u64 {
+        self.source_position.saturating_sub(self.playback_position)
+    }
+
+    pub fn should_refill(&self) -> bool {
+        !self.source_eof && self.buffered <= self.low_watermark
+    }
+}
+
+#[derive(Debug)]
+pub struct StreamingWorkerState {
+    options: StreamingWorkerOptions,
+    buffer: StreamingBuffer,
+    playback_position: u64,
+    source_position: u64,
+    file_size: u64,
+    source_eof: bool,
+}
+
+impl StreamingWorkerState {
+    pub fn new(file_size: u64, options: StreamingWorkerOptions) -> Result<Self, Error> {
+        options.validate()?;
+
+        Ok(Self {
+            options,
+            buffer: StreamingBuffer::new(),
+            playback_position: 0,
+            source_position: 0,
+            file_size,
+            source_eof: file_size == 0,
+        })
+    }
+
+    pub fn with_defaults(file_size: u64) -> Self {
+        Self::new(file_size, StreamingWorkerOptions::default())
+            .expect("default streaming worker options must be valid")
+    }
+
+    pub fn options(&self) -> StreamingWorkerOptions {
+        self.options
+    }
+
+    pub fn playback_position(&self) -> u64 {
+        self.playback_position
+    }
+
+    pub fn source_position(&self) -> u64 {
+        self.source_position
+    }
+
+    pub fn file_size(&self) -> u64 {
+        self.file_size
+    }
+
+    pub fn buffered_len(&self) -> usize {
+        self.buffer.buffered_len()
+    }
+
+    pub fn is_source_eof(&self) -> bool {
+        self.source_eof
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.source_eof && self.buffer.is_empty()
+    }
+
+    pub fn stats(&self) -> StreamingWorkerStats {
+        StreamingWorkerStats {
+            playback_position: self.playback_position,
+            source_position: self.source_position,
+            file_size: self.file_size,
+            buffered: self.buffer.buffered_len(),
+            buffered_chunks: self.buffer.chunk_count(),
+            low_watermark: self.options.low_watermark,
+            high_watermark: self.options.high_watermark,
+            read_request_size: self.options.read_request_size,
+            source_eof: self.source_eof,
+        }
+    }
+
+    pub fn next_source_read_len(&self) -> usize {
+        if self.source_eof || self.source_position >= self.file_size {
+            return 0;
+        }
+
+        if self.buffer.buffered_len() > self.options.low_watermark {
+            return 0;
+        }
+
+        let free = self
+            .options
+            .high_watermark
+            .saturating_sub(self.buffer.buffered_len());
+        if free == 0 {
+            return 0;
+        }
+
+        let count = free.min(usize::from(self.options.stream_options.chunk_size));
+        let remaining = self.file_size.saturating_sub(self.source_position);
+
+        if remaining > usize::MAX as u64 {
+            count
+        } else {
+            count.min(remaining as usize)
+        }
+    }
+
+    pub fn push_source_chunk(&mut self, chunk: Bytes) -> Result<(), Error> {
+        if chunk.is_empty() {
+            self.source_eof = true;
+            return Ok(());
+        }
+
+        let remaining = self.file_size.saturating_sub(self.source_position);
+        if chunk.len() as u64 > remaining {
+            return Err(Error::InternalError(
+                "streaming worker source returned more data than remains in file".to_owned(),
+            ));
+        }
+
+        self.source_position += chunk.len() as u64;
+        self.buffer.push(chunk);
+
+        if self.source_position >= self.file_size {
+            self.source_eof = true;
+        }
+
+        Ok(())
+    }
+
+    pub fn pop_read(&mut self, max_len: usize) -> Option<Bytes> {
+        let chunk = self.buffer.pop_block(max_len)?;
+        self.playback_position += chunk.len() as u64;
+        Some(chunk)
+    }
+
+    pub fn mark_source_eof(&mut self) {
+        self.source_eof = true;
+    }
+
+    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+        let next = seek_position(self.file_size, self.playback_position, pos)?;
+
+        self.buffer.clear();
+        self.playback_position = next;
+        self.source_position = next;
+        self.source_eof = next >= self.file_size;
+
+        Ok(next)
+    }
+}
+
 impl FileStream {
     pub fn new(handle: Handle) -> Self {
         Self {
@@ -1608,7 +1778,7 @@ mod tests {
         media_presentations_with_summaries, read_count_for, resolve_smb_uri, retain_media_entries,
         seek_position, sort_dir_entries, MediaEntry, MediaFolderSummary, MediaKind,
         MediaPresentation, ReadAhead, StreamOptions, StreamingBuffer, StreamingWorkerOptions,
-        SMB_READ_MAX,
+        StreamingWorkerState, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -2265,5 +2435,104 @@ mod tests {
         assert_eq!(buffer.buffered_len(), 0);
         assert_eq!(buffer.chunk_count(), 0);
         assert_eq!(buffer.pop_bytes(1), None);
+    }
+
+    #[test]
+    fn streaming_worker_state_starts_empty_and_requests_initial_source_read() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 4, 12, 8).unwrap();
+        let state = StreamingWorkerState::new(100, options).unwrap();
+
+        assert_eq!(state.playback_position(), 0);
+        assert_eq!(state.source_position(), 0);
+        assert_eq!(state.file_size(), 100);
+        assert_eq!(state.buffered_len(), 0);
+        assert!(!state.is_source_eof());
+        assert_eq!(state.next_source_read_len(), 4);
+
+        let stats = state.stats();
+        assert_eq!(stats.remaining(), 100);
+        assert_eq!(stats.prefetched(), 0);
+        assert!(stats.should_refill());
+    }
+
+    #[test]
+    fn streaming_worker_state_refills_only_below_low_watermark() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
+        let mut state = StreamingWorkerState::new(100, options).unwrap();
+
+        assert_eq!(state.next_source_read_len(), 4);
+
+        state
+            .push_source_chunk(Bytes::from_static(b"abcd"))
+            .unwrap();
+        assert_eq!(state.source_position(), 4);
+        assert_eq!(state.buffered_len(), 4);
+        assert_eq!(state.next_source_read_len(), 0);
+
+        assert_eq!(state.pop_read(2).unwrap().as_ref(), b"ab");
+        assert_eq!(state.playback_position(), 2);
+        assert_eq!(state.buffered_len(), 2);
+        assert_eq!(state.next_source_read_len(), 4);
+    }
+
+    #[test]
+    fn streaming_worker_state_rejects_source_overread() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
+        let mut state = StreamingWorkerState::new(3, options).unwrap();
+
+        assert!(state
+            .push_source_chunk(Bytes::from_static(b"abcd"))
+            .is_err());
+        assert_eq!(state.source_position(), 0);
+        assert_eq!(state.buffered_len(), 0);
+    }
+
+    #[test]
+    fn streaming_worker_state_tracks_eof_after_last_source_chunk() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
+        let mut state = StreamingWorkerState::new(3, options).unwrap();
+
+        assert_eq!(state.next_source_read_len(), 3);
+        state.push_source_chunk(Bytes::from_static(b"abc")).unwrap();
+
+        assert!(state.is_source_eof());
+        assert!(!state.is_finished());
+
+        assert_eq!(state.pop_read(10).unwrap().as_ref(), b"abc");
+        assert!(state.is_finished());
+    }
+
+    #[test]
+    fn streaming_worker_state_seek_clears_buffer_and_resets_source_position() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
+        let mut state = StreamingWorkerState::new(100, options).unwrap();
+
+        state
+            .push_source_chunk(Bytes::from_static(b"abcd"))
+            .unwrap();
+        assert_eq!(state.pop_read(2).unwrap().as_ref(), b"ab");
+
+        assert_eq!(state.seek(SeekFrom::Start(50)).unwrap(), 50);
+        assert_eq!(state.playback_position(), 50);
+        assert_eq!(state.source_position(), 50);
+        assert_eq!(state.buffered_len(), 0);
+        assert!(!state.is_source_eof());
+        assert_eq!(state.next_source_read_len(), 4);
+    }
+
+    #[test]
+    fn streaming_worker_state_seek_to_end_marks_source_eof() {
+        let mut state = StreamingWorkerState::with_defaults(100);
+
+        assert_eq!(state.seek(SeekFrom::End(0)).unwrap(), 100);
+        assert_eq!(state.playback_position(), 100);
+        assert_eq!(state.source_position(), 100);
+        assert!(state.is_source_eof());
+        assert!(state.is_finished());
     }
 }

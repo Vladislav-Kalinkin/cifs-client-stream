@@ -99,6 +99,7 @@ async fn run() -> Result<(), Error> {
         let started = Instant::now();
         let mut total = 0usize;
         let mut slowest = Duration::ZERO;
+        let mut block_times = Vec::with_capacity(read_blocks);
 
         for block_index in 0..read_blocks {
             let block_started = Instant::now();
@@ -113,6 +114,7 @@ async fn run() -> Result<(), Error> {
             }
             total += block.len();
             slowest = slowest.max(block_elapsed);
+            block_times.push(block_elapsed);
             let block_mbps = if block_elapsed.is_zero() {
                 0.0
             } else {
@@ -139,6 +141,13 @@ async fn run() -> Result<(), Error> {
             "read {} bytes from {} in {:?} ({:.2} MiB/s), slowest block {:?}",
             total, path, elapsed, mbps, slowest
         );
+        if !block_times.is_empty() {
+            println!(
+                "block latency: p95 {:?}, p99 {:?}",
+                percentile_duration(&mut block_times, 95),
+                percentile_duration(&mut block_times, 99)
+            );
+        }
         cifs.close_read_ahead(stream).await?;
     }
 
@@ -158,6 +167,12 @@ fn env_usize(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+fn percentile_duration(values: &mut [Duration], percentile: usize) -> Duration {
+    values.sort_unstable();
+    let index = (values.len() * percentile).div_ceil(100).saturating_sub(1);
+    values[index]
 }
 
 fn presentation_name(presentation: &MediaPresentation) -> &'static str {

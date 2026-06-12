@@ -509,6 +509,37 @@ impl StreamingWorkerState {
         })
     }
 
+    pub fn next_high_watermark_read_request(&self) -> Option<StreamingWorkerReadRequest> {
+        if self.source_eof || self.source_position >= self.file_size {
+            return None;
+        }
+
+        let free = self
+            .options
+            .high_watermark
+            .saturating_sub(self.buffer.buffered_len());
+        if free == 0 {
+            return None;
+        }
+
+        let count = free.min(usize::from(self.options.stream_options.chunk_size));
+        let remaining = self.file_size.saturating_sub(self.source_position);
+        let len = if remaining > usize::MAX as u64 {
+            count
+        } else {
+            count.min(remaining as usize)
+        };
+
+        if len == 0 {
+            return None;
+        }
+
+        Some(StreamingWorkerReadRequest {
+            offset: self.source_position,
+            len,
+        })
+    }
+
     pub fn push_source_chunk(&mut self, chunk: Bytes) -> Result<(), Error> {
         if chunk.is_empty() {
             self.source_eof = true;
@@ -620,6 +651,37 @@ impl StreamingWorker {
         timeout: Duration,
     ) -> Result<bool, Error> {
         with_timeout(timeout, self.fill_once(cifs)).await
+    }
+
+    pub async fn fill_to_high_watermark(&mut self, cifs: &mut Cifs) -> Result<bool, Error> {
+        let mut filled = false;
+
+        while let Some(request) = self.state.next_high_watermark_read_request() {
+            let count: u16 = request.len.try_into()?;
+            let chunk = cifs
+                .read_at(&self.stream.handle, request.offset, count)
+                .await?;
+
+            self.state.push_source_chunk(chunk)?;
+            self.stream
+                .seek(SeekFrom::Start(self.state.source_position()))?;
+
+            filled = true;
+
+            if self.state.is_source_eof() {
+                break;
+            }
+        }
+
+        Ok(filled)
+    }
+
+    pub async fn fill_to_high_watermark_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        timeout: Duration,
+    ) -> Result<bool, Error> {
+        with_timeout(timeout, self.fill_to_high_watermark(cifs)).await
     }
 
     pub async fn read_block(
@@ -2807,5 +2869,54 @@ mod tests {
 
         assert_eq!(worker.read_available(10).unwrap().as_ref(), b"abc");
         assert!(worker.is_finished());
+    }
+
+    #[test]
+    fn streaming_worker_state_reports_high_watermark_read_request() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
+        let mut state = StreamingWorkerState::new(100, options).unwrap();
+
+        assert_eq!(
+            state.next_high_watermark_read_request(),
+            Some(StreamingWorkerReadRequest { offset: 0, len: 4 })
+        );
+
+        state
+            .push_source_chunk(Bytes::from_static(b"abcd"))
+            .unwrap();
+
+        assert_eq!(
+            state.next_high_watermark_read_request(),
+            Some(StreamingWorkerReadRequest { offset: 4, len: 4 })
+        );
+    }
+
+    #[test]
+    fn streaming_worker_state_high_watermark_request_stops_at_limit() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 8, 8).unwrap();
+        let mut state = StreamingWorkerState::new(100, options).unwrap();
+
+        state
+            .push_source_chunk(Bytes::from_static(b"abcd"))
+            .unwrap();
+        state
+            .push_source_chunk(Bytes::from_static(b"efgh"))
+            .unwrap();
+
+        assert_eq!(state.next_high_watermark_read_request(), None);
+    }
+
+    #[test]
+    fn streaming_worker_state_high_watermark_request_respects_file_end() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
+        let state = StreamingWorkerState::new(3, options).unwrap();
+
+        assert_eq!(
+            state.next_high_watermark_read_request(),
+            Some(StreamingWorkerReadRequest { offset: 0, len: 3 })
+        );
     }
 }

@@ -50,6 +50,8 @@ async fn run() -> Result<(), Error> {
     let chunk_size = env_u16("SMB_CHUNK_SIZE", default_stream_options.chunk_size);
     let stream_options = StreamOptions::new(read_ahead_bytes, chunk_size)?;
     let use_streaming_worker = env_bool("SMB_STREAMING_WORKER", false);
+    let print_entries = env_bool("SMB_PRINT_ENTRIES", false);
+    let worker_prefill = env_bool("SMB_WORKER_PREFILL", false);
 
     let timeout = Duration::from_millis(timeout);
 
@@ -90,18 +92,21 @@ async fn run() -> Result<(), Error> {
     }
     println!("listed pattern: {pattern}");
     println!("media entries in first batch: {}", entries.len());
-    for (entry, presentation) in entries
-        .iter()
-        .zip(presentations.iter())
-        .take(MAX_ENTRIES_TO_PRINT)
-    {
-        println!(
-            "- {:?} {} size={} presentation={}",
-            entry.kind,
-            entry.name,
-            entry.size,
-            presentation_name(presentation)
-        );
+
+    if print_entries {
+        for (entry, presentation) in entries
+            .iter()
+            .zip(presentations.iter())
+            .take(MAX_ENTRIES_TO_PRINT)
+        {
+            println!(
+                "- {:?} {} size={} presentation={}",
+                entry.kind,
+                entry.name,
+                entry.size,
+                presentation_name(presentation)
+            );
+        }
     }
 
     if let Some(path) = read_path {
@@ -111,7 +116,9 @@ async fn run() -> Result<(), Error> {
             read_blocks,
             stream_options.read_ahead_capacity,
             stream_options.chunk_size,
-            if use_streaming_worker {
+            if use_streaming_worker && worker_prefill {
+                "streaming-worker-prefill"
+            } else if use_streaming_worker {
                 "streaming-worker"
             } else {
                 "read-ahead"
@@ -145,6 +152,45 @@ async fn run() -> Result<(), Error> {
                 .open_streaming_worker_with_options(&share, &path, worker_options)
                 .await?;
 
+            let mut initial_prefill_elapsed = Duration::ZERO;
+            let mut initial_prefill_bytes = 0usize;
+
+            if worker_prefill {
+                let before = worker.stats();
+                let prefill_started = Instant::now();
+
+                worker
+                    .fill_to_high_watermark_timeout(&mut cifs, timeout)
+                    .await?;
+
+                let prefill_elapsed = prefill_started.elapsed();
+                let after = worker.stats();
+                let source_delta = after.source_position.saturating_sub(before.source_position);
+
+                initial_prefill_elapsed = prefill_elapsed;
+                initial_prefill_bytes = source_delta as usize;
+
+                let prefill_mbps = if prefill_elapsed.is_zero() {
+                    0.0
+                } else {
+                    (source_delta as f64 / (1024.0 * 1024.0)) / prefill_elapsed.as_secs_f64()
+                };
+
+                println!(
+                    concat!(
+                        "initial worker prefill: source {}->{} source_delta={} ",
+                        "in {:?} ({:.2} MiB/s) buffered={} chunks={}"
+                    ),
+                    before.source_position,
+                    after.source_position,
+                    source_delta,
+                    prefill_elapsed,
+                    prefill_mbps,
+                    after.buffered,
+                    after.buffered_chunks
+                );
+            }
+
             let started = Instant::now();
             let mut total = 0usize;
             let mut slowest = Duration::ZERO;
@@ -157,10 +203,21 @@ async fn run() -> Result<(), Error> {
             for block_index in 0..read_blocks {
                 let before = worker.stats();
                 let block_started = Instant::now();
-                let block = worker
-                    .read_block_timeout(&mut cifs, read_bytes, timeout)
-                    .await?
-                    .unwrap_or_default();
+
+                let block = if worker_prefill {
+                    match worker.read_available(read_bytes) {
+                        Some(block) => block,
+                        None => worker
+                            .read_block_timeout(&mut cifs, read_bytes, timeout)
+                            .await?
+                            .unwrap_or_default(),
+                    }
+                } else {
+                    worker
+                        .read_block_timeout(&mut cifs, read_bytes, timeout)
+                        .await?
+                        .unwrap_or_default()
+                };
                 let block_elapsed = block_started.elapsed();
                 let after = worker.stats();
 
@@ -223,6 +280,34 @@ async fn run() -> Result<(), Error> {
                 "read {} bytes from {} in {:?} ({:.2} MiB/s), slowest block {:?}",
                 total, path, elapsed, mbps, slowest
             );
+
+            if worker_prefill {
+                let total_with_prefill = elapsed + initial_prefill_elapsed;
+                let delivered_mbps_with_prefill = if total_with_prefill.is_zero() {
+                    0.0
+                } else {
+                    (total as f64 / (1024.0 * 1024.0)) / total_with_prefill.as_secs_f64()
+                };
+                let source_mbps_with_prefill = if initial_prefill_elapsed.is_zero() {
+                    0.0
+                } else {
+                    (initial_prefill_bytes as f64 / (1024.0 * 1024.0))
+                        / initial_prefill_elapsed.as_secs_f64()
+                };
+
+                println!(
+                    concat!(
+                        "total including initial prefill: delivered={} bytes in {:?} ",
+                        "({:.2} MiB/s delivered), initial_prefill={} bytes ",
+                        "({:.2} MiB/s source)"
+                    ),
+                    total,
+                    total_with_prefill,
+                    delivered_mbps_with_prefill,
+                    initial_prefill_bytes,
+                    source_mbps_with_prefill
+                );
+            }
 
             if !refill_times.is_empty() {
                 let refill_elapsed: Duration = refill_times.iter().copied().sum();

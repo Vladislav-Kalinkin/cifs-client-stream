@@ -1,0 +1,90 @@
+name: SMB smoke test report
+description: Submit a cifs-client-stream smoke test result
+title: "[smoke] "
+labels: ["smoke-report", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing cifs-client-stream.
+
+        Do not include real passwords, public IP addresses, personal details,
+        private media names, or anything you do not want to share publicly.
+
+        Attach the generated smoke report `.txt` if possible.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: SMOKE REPORT SUMMARY
+      description: Paste the final SMOKE REPORT SUMMARY block here.
+      placeholder: |
+        --- SMOKE REPORT SUMMARY ---
+        read_path: ...
+        read_bytes: ...
+        ...
+        --- END SMOKE REPORT SUMMARY ---
+    validations:
+      required: true
+
+  - type: input
+    id: client_os
+    attributes:
+      label: Client OS
+      placeholder: "macOS 15 / Windows 11 / Linux / other"
+    validations:
+      required: false
+
+  - type: input
+    id: smb_server
+    attributes:
+      label: SMB server / device
+      placeholder: "AirPort Extreme, Time Capsule, Samba, old NAS, router model..."
+    validations:
+      required: false
+
+  - type: dropdown
+    id: network
+    attributes:
+      label: Network connection
+      options:
+        - Wired Ethernet
+        - Wi-Fi
+        - Unknown
+    validations:
+      required: false
+
+  - type: dropdown
+    id: disk_state
+    attributes:
+      label: Disk state
+      options:
+        - Warm / already awake
+        - Cold / likely sleeping before test
+        - Unknown
+    validations:
+      required: false
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command used
+      description: Remove passwords before posting.
+      render: shell
+      placeholder: |
+        SMB_HOST='...' \
+        SMB_SHARE='...' \
+        SMB_USER='...' \
+        SMB_PASSWORD='REDACTED' \
+        ...
+        cargo run --bin smb_smoke
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Mention timeouts, disconnects, non-English filenames, folder classification problems, or unusual behavior.
+    validations:
+      required: false

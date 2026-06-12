@@ -466,6 +466,15 @@ applied directly.
 
 This is not a public Apex beta and not a finished Apple TV media player.
 
+Official technical smoke test reports are accepted through GitHub Issues.
+A GitHub account is required to submit an issue or comment.
+
+If you do not want to create a GitHub account, you can still run the smoke
+test locally and keep the generated `.txt` report for later.
+
+Do not include real passwords, public IP addresses, personal details, private
+media names, or anything you do not want to share publicly.
+
 The current suitable public-facing test is a technical backend smoke test:
 
 ```text

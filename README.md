@@ -29,6 +29,8 @@ SMB_READ_BYTES=262144
 SMB_READ_BLOCKS=4
 ```
 
+With `SMB_READ_BLOCKS`, the smoke test prints per-block latency and throughput plus the overall average.
+
 ## Contributing
 
 If you find that there's some feature not covered by this implementation, or you happen to find a bug, we'll welcome pull requests with your improvements.

@@ -96,21 +96,32 @@ async fn run() -> Result<(), Error> {
             .await?;
         let started = Instant::now();
         let mut total = 0usize;
+        let mut slowest = Duration::ZERO;
 
         for block_index in 0..read_blocks {
+            let block_started = Instant::now();
             let block = stream
                 .read_block_timeout(&mut cifs, read_bytes, timeout)
                 .await?
                 .unwrap_or_default();
+            let block_elapsed = block_started.elapsed();
             if block.is_empty() {
                 println!("reached EOF after {} blocks", block_index);
                 break;
             }
             total += block.len();
+            slowest = slowest.max(block_elapsed);
+            let block_mbps = if block_elapsed.is_zero() {
+                0.0
+            } else {
+                (block.len() as f64 / (1024.0 * 1024.0)) / block_elapsed.as_secs_f64()
+            };
             println!(
-                "block {} read {} bytes at source_position={} buffered={}",
+                "block {} read {} bytes in {:?} ({:.2} MiB/s) at source_position={} buffered={}",
                 block_index + 1,
                 block.len(),
+                block_elapsed,
+                block_mbps,
                 stream.stats().source_position,
                 stream.stats().buffered
             );
@@ -123,8 +134,8 @@ async fn run() -> Result<(), Error> {
             (total as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
         };
         println!(
-            "read {} bytes from {} in {:?} ({:.2} MiB/s)",
-            total, path, elapsed, mbps
+            "read {} bytes from {} in {:?} ({:.2} MiB/s), slowest block {:?}",
+            total, path, elapsed, mbps, slowest
         );
         cifs.close_read_ahead(stream).await?;
     }

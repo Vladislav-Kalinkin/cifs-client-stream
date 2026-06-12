@@ -1,6 +1,6 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use hex_literal::hex;
-use rand::{rngs::OsRng, RngCore};
+use rand::{RngCore, rngs::OsRng};
 
 use super::{ChallengeMsg, Error};
 use crate::utils;

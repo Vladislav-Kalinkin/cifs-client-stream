@@ -4,9 +4,9 @@ use chrono::{DateTime, Local};
 use crate::utils;
 use crate::win::*;
 
+use super::Error;
 use super::common::*;
 use super::info::*;
-use super::Error;
 
 /// Helper struct holding all relevant information of a reply
 /// to be used by create() method.

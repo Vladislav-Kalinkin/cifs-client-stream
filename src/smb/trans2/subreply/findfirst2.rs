@@ -1,6 +1,6 @@
 use bytes::{Buf, Bytes};
 
-use crate::smb::{trans2::SubReply, DirInfo, Error};
+use crate::smb::{DirInfo, Error, trans2::SubReply};
 
 /// Reply to TRANS2_FIND_FIRST2, see 2.2.6.2.2
 pub struct FindFirst2 {

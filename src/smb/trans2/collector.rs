@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use bytes::{BufMut, Bytes, BytesMut};
 use itertools::Itertools;
 
-use super::reply::Transact2;
 use super::SubReply;
+use super::reply::Transact2;
 use crate::smb::Error;
 
 /// Collects parameter and data for a Transact2 subcommand.

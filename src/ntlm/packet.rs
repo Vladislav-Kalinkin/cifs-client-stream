@@ -1,7 +1,7 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
-use super::buffer::Buffer;
 use super::Error;
+use super::buffer::Buffer;
 use crate::utils;
 
 enum PacketEntry {

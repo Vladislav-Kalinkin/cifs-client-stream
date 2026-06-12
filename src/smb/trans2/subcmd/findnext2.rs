@@ -1,9 +1,9 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::smb::{
+    Error,
     common::{FindFlags, FindInfoLevel},
     trans2::SubCmd,
-    Error,
 };
 use crate::utils;
 

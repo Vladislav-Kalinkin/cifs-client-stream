@@ -1,10 +1,10 @@
 use bytes::{BufMut, BytesMut};
 
 use super::SubCmd;
+use crate::smb::Error;
 use crate::smb::common::SMB_HEADER_LEN;
 use crate::smb::info::{Cmd, Info};
 use crate::smb::msg::Msg;
-use crate::smb::Error;
 use crate::utils;
 
 /// Parameter for SMB_COM_TRANSACTION2 (0x32), see 2.2.4.46.

@@ -1,8 +1,8 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
+use crate::smb::Error;
 use crate::smb::common::{FindFlags, FindInfoLevel};
 use crate::smb::trans2::SubCmd;
-use crate::smb::Error;
 use crate::utils;
 use crate::win::FileAttr;
 

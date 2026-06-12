@@ -16,7 +16,7 @@ use regex::Regex;
 
 use crate::netbios::NetBios;
 use crate::smb::info::{Cmd, Flags2, Info, Status};
-use crate::smb::{msg, reply, trans2, Capabilities, DirInfo, SMB_LEGACY_READ_MAX};
+use crate::smb::{Capabilities, DirInfo, SMB_LEGACY_READ_MAX, msg, reply, trans2};
 use crate::utils::sanitize_path;
 use crate::win::{ExtFileAttr, FileAttr, NTStatus};
 
@@ -1807,12 +1807,13 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
+        DEFAULT_SMB1_PIPELINE_DEPTH, MediaEntry, MediaExtraKind, MediaFolderSummary, MediaKind,
+        MediaPresentation, SMB_LEGACY_READ_MAX, SmbMediaStream, SmbMediaStreamOptions,
+        StreamOptions, StreamingBuffer, StreamingWorker, StreamingWorkerOptions,
+        StreamingWorkerReadRequest, StreamingWorkerState, StreamingWorkerStats,
         is_likely_extra_video, is_media_entry, main_video_index, media_extra_kind,
         media_presentations, resolve_smb_uri, retain_media_entries, seek_position,
-        sort_dir_entries, MediaEntry, MediaExtraKind, MediaFolderSummary, MediaKind,
-        MediaPresentation, SmbMediaStream, SmbMediaStreamOptions, StreamOptions, StreamingBuffer,
-        StreamingWorker, StreamingWorkerOptions, StreamingWorkerReadRequest, StreamingWorkerState,
-        StreamingWorkerStats, DEFAULT_SMB1_PIPELINE_DEPTH, SMB_LEGACY_READ_MAX,
+        sort_dir_entries,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -1857,19 +1858,19 @@ mod tests {
     fn streaming_worker_options_reject_invalid_watermarks() {
         let stream_options = StreamOptions::default();
 
-        assert!(StreamingWorkerOptions::new(
-            stream_options,
-            stream_options.read_ahead_capacity + 1,
-            stream_options.read_ahead_capacity,
-        )
-        .is_err());
+        assert!(
+            StreamingWorkerOptions::new(
+                stream_options,
+                stream_options.read_ahead_capacity + 1,
+                stream_options.read_ahead_capacity,
+            )
+            .is_err()
+        );
 
-        assert!(StreamingWorkerOptions::new(
-            stream_options,
-            0,
-            stream_options.read_ahead_capacity + 1,
-        )
-        .is_err());
+        assert!(
+            StreamingWorkerOptions::new(stream_options, 0, stream_options.read_ahead_capacity + 1,)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2375,9 +2376,11 @@ mod tests {
             StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12).unwrap();
         let mut state = StreamingWorkerState::new(3, options).unwrap();
 
-        assert!(state
-            .push_source_chunk(Bytes::from_static(b"abcd"))
-            .is_err());
+        assert!(
+            state
+                .push_source_chunk(Bytes::from_static(b"abcd"))
+                .is_err()
+        );
         assert_eq!(state.source_position(), 0);
         assert_eq!(state.buffered_len(), 0);
     }

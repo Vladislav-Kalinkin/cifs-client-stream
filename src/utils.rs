@@ -1,7 +1,7 @@
 use bytes::{Buf, Bytes};
 use chrono::{DateTime, Duration, Local, TimeZone, Utc};
-use des::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
 use des::Des;
+use des::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
 use hmac::{Hmac, Mac};
 use md4::Md4;
 use md5::{Digest, Md5};
@@ -139,11 +139,7 @@ pub fn fill_up_4n(n: usize) -> usize {
 
 /// try subtracting b from a and return None in case of underflow
 pub fn try_sub(a: usize, b: usize) -> Option<usize> {
-    if a < b {
-        None
-    } else {
-        Some(a - b)
-    }
+    if a < b { None } else { Some(a - b) }
 }
 
 fn expand_des_key(data: &[u8]) -> [u8; 8] {

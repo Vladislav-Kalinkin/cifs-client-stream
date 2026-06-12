@@ -5,8 +5,8 @@ use chrono::{DateTime, Local};
 use crate::utils;
 use crate::win::ExtFileAttr;
 
-use super::info::Cmd;
 use super::Error;
+use super::info::Cmd;
 
 pub(crate) const SMB_MAX_LEN: usize = 4096;
 pub(crate) const SMB_HEADER_LEN: usize = 32;

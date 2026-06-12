@@ -2,10 +2,10 @@ use std::env;
 use std::time::Duration;
 use std::time::Instant;
 
-use cifs_client::{
-    media_presentations, media_presentations_with_summaries, resolve_smb_uri, Auth, Cifs,
-    CifsIoStats, Error, MediaEntry, MediaFolderSummary, MediaPresentation, Share,
+use cifs_client_stream::{
+    Auth, Cifs, CifsIoStats, Error, MediaEntry, MediaFolderSummary, MediaPresentation, Share,
     SmbMediaStreamOptions, StreamOptions, StreamingWorkerOptions, StreamingWorkerStats,
+    media_presentations, media_presentations_with_summaries, resolve_smb_uri,
 };
 
 const DEFAULT_READ_BYTES: usize = 256 * 1024;
@@ -90,10 +90,10 @@ async fn run() -> Result<(), Error> {
 
     let Some(share_name) = share_name else {
         println!("connected to \\\\{connect_host}");
-        if let Some(parsed_hostname) = parsed_hostname {
-            if connect_host != parsed_hostname {
-                println!("resolved uri host {parsed_hostname} via SMB_HOST {connect_host}");
-            }
+        if let Some(parsed_hostname) = parsed_hostname
+            && connect_host != parsed_hostname
+        {
+            println!("resolved uri host {parsed_hostname} via SMB_HOST {connect_host}");
         }
         println!("SMB share name is required for this server");
         println!("set SMB_SHARE, for example: SMB_SHARE='HARD'");
@@ -139,10 +139,10 @@ async fn run() -> Result<(), Error> {
     };
 
     println!("connected to {mount_path}");
-    if let Some(parsed_hostname) = parsed_hostname {
-        if connect_host != parsed_hostname {
-            println!("resolved uri host {parsed_hostname} via SMB_HOST {connect_host}");
-        }
+    if let Some(parsed_hostname) = parsed_hostname
+        && connect_host != parsed_hostname
+    {
+        println!("resolved uri host {parsed_hostname} via SMB_HOST {connect_host}");
     }
     println!("listed pattern: {pattern}");
     println!("media entries in first batch: {}", entries.len());
@@ -206,12 +206,12 @@ async fn run() -> Result<(), Error> {
 
         println!(
             "worker options: low_watermark={} high_watermark={} initial_buffer={} prefill_target={} pipeline_depth={}",
-                media_stream_options.worker_options.low_watermark,
-                media_stream_options.worker_options.high_watermark,
-                media_stream_options.initial_buffer_size,
-                media_stream_options.worker_options.high_watermark,
-                media_stream_options.worker_options.pipeline_depth
-            );
+            media_stream_options.worker_options.low_watermark,
+            media_stream_options.worker_options.high_watermark,
+            media_stream_options.initial_buffer_size,
+            media_stream_options.worker_options.high_watermark,
+            media_stream_options.worker_options.pipeline_depth
+        );
 
         cifs.reset_io_stats();
         let mut media_stream = cifs

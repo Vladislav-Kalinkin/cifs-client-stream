@@ -1,8 +1,8 @@
 use bytes::{Buf, Bytes};
 
+use crate::smb::Error;
 use crate::smb::info::Cmd;
 use crate::smb::reply::{Reply, ReplyCtx};
-use crate::smb::Error;
 use crate::utils;
 
 /// Reply to SMB_COM_TRANSACTION2, see 2.2.4.46.2

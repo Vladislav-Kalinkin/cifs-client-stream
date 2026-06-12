@@ -3,10 +3,10 @@ use bytes::{BufMut, Bytes, BytesMut};
 use crate::utils;
 use crate::win::*;
 
+use super::Error;
 use super::common::*;
 use super::info::*;
 use super::reply::Handle;
-use super::Error;
 
 pub(crate) trait Msg {
     const CMD: Cmd;

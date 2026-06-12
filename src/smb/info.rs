@@ -4,8 +4,8 @@ use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use super::common::{SMB_HEADER_LEN, SMB_MAGIC};
 use super::Error;
+use super::common::{SMB_HEADER_LEN, SMB_MAGIC};
 use crate::win::NTStatus;
 
 /// Info is the information from SMB header

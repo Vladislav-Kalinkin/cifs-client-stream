@@ -44,23 +44,6 @@ pub enum NTStatus {
     DIRECTORY_NOT_EMPTY = 0xc0000101,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoPrimitive, TryFromPrimitive)]
-#[allow(non_camel_case_types)]
-#[repr(u32)]
-pub enum NotifyAction {
-    ADDED = 0x00000001,
-    REMOVED = 0x00000002,
-    MODIFIED = 0x00000003,
-    RENAMED_OLD = 0x00000004,
-    RENAMED_NEW = 0x00000005,
-    ADDED_STREAM = 0x00000006,
-    REMOVED_STREAM = 0x00000007,
-    MODIFIED_STREAM = 0x00000008,
-    DELETED = 0x00000009,
-    NOT_TUNNELLED = 0x0000000a,
-    TUNNELLED_COLLISION = 0x0000000b,
-}
-
 bitflags! {
     /// File Acces Mask
     pub struct FileAccessMask: u32 {

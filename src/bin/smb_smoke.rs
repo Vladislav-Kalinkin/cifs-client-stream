@@ -318,21 +318,36 @@ async fn run() -> Result<(), Error> {
         }
 
         let elapsed = started.elapsed();
+        let stream_io_stats = cifs.io_stats();
+
         measurements.print_summary(&path, elapsed);
         prefill_measurements.print_summary();
-        print_io_stats("stream source reads", cifs.io_stats());
+        print_io_stats("stream source reads", stream_io_stats);
 
         if worker_initial_buffer > 0 {
             let total_with_initial = elapsed + initial_prefill_elapsed;
             println!(
-                    "total including initial buffer: delivered={} bytes in {:?} ({:.2} MiB/s delivered), initial_buffer={} bytes ({:.2} MiB/s source)",
-                    measurements.total,
-                    total_with_initial,
-                    mib_per_second(measurements.total, total_with_initial),
-                    initial_prefill_bytes,
-                    mib_per_second(initial_prefill_bytes, initial_prefill_elapsed)
-                );
+                "total including initial buffer: delivered={} bytes in {:?} ({:.2} MiB/s delivered), initial_buffer={} bytes ({:.2} MiB/s source)",
+                measurements.total,
+                total_with_initial,
+                mib_per_second(measurements.total, total_with_initial),
+                initial_prefill_bytes,
+                mib_per_second(initial_prefill_bytes, initial_prefill_elapsed)
+            );
         }
+
+        print_report_summary(SmokeReportSummary {
+            path: &path,
+            read_bytes,
+            read_blocks,
+            stream_options: &stream_options,
+            media_stream_options: &media_stream_options,
+            measurements: &measurements,
+            read_elapsed: elapsed,
+            initial_prefill_bytes,
+            initial_prefill_elapsed,
+            stream_io_stats,
+        });
 
         cifs.close_media_stream(media_stream).await?;
     }
@@ -509,6 +524,19 @@ impl SmokePrefillMeasurements {
     }
 }
 
+struct SmokeReportSummary<'a> {
+    path: &'a str,
+    read_bytes: usize,
+    read_blocks: usize,
+    stream_options: &'a StreamOptions,
+    media_stream_options: &'a SmbMediaStreamOptions,
+    measurements: &'a SmokeMeasurements,
+    read_elapsed: Duration,
+    initial_prefill_bytes: usize,
+    initial_prefill_elapsed: Duration,
+    stream_io_stats: CifsIoStats,
+}
+
 async fn scan_media_folder_summaries(
     cifs: &mut Cifs,
     share: &Share,
@@ -577,6 +605,92 @@ fn print_io_stats(label: &str, stats: CifsIoStats) {
     );
 }
 
+fn print_report_summary(summary: SmokeReportSummary<'_>) {
+    let total_elapsed = summary.read_elapsed + summary.initial_prefill_elapsed;
+
+    println!();
+    println!("--- SMOKE REPORT SUMMARY ---");
+    println!("read_path: {}", summary.path);
+    println!("read_bytes: {}", summary.read_bytes);
+    println!("read_blocks_requested: {}", summary.read_blocks);
+    println!("delivered_bytes: {}", summary.measurements.total);
+    println!(
+        "configured_chunk_size: {}",
+        summary.stream_options.chunk_size
+    );
+    println!(
+        "effective_chunk_size: {}",
+        summary.stream_options.effective_chunk_size()
+    );
+    println!(
+        "read_ahead_capacity: {}",
+        summary.stream_options.read_ahead_capacity
+    );
+    println!(
+        "initial_buffer: {}",
+        summary.media_stream_options.initial_buffer_size
+    );
+    println!(
+        "low_watermark: {}",
+        summary.media_stream_options.worker_options.low_watermark
+    );
+    println!(
+        "high_watermark: {}",
+        summary.media_stream_options.worker_options.high_watermark
+    );
+    println!(
+        "pipeline_depth: {}",
+        summary.media_stream_options.worker_options.pipeline_depth
+    );
+    println!(
+        "initial_buffer_mib_s: {:.2}",
+        mib_per_second(
+            summary.initial_prefill_bytes,
+            summary.initial_prefill_elapsed,
+        )
+    );
+    println!(
+        "read_phase_mib_s: {:.2}",
+        mib_per_second(summary.measurements.total, summary.read_elapsed)
+    );
+    println!(
+        "total_mib_s: {:.2}",
+        mib_per_second(summary.measurements.total, total_elapsed)
+    );
+    println!("slowest_block: {:?}", summary.measurements.slowest);
+    println!("refill_blocks: {}", summary.measurements.refill_times.len());
+    println!("cached_blocks: {}", summary.measurements.cached_times.len());
+    println!(
+        "block_latency_p95: {:?}",
+        percentile_duration_copy(&summary.measurements.block_times, 95)
+    );
+    println!(
+        "block_latency_p99: {:?}",
+        percentile_duration_copy(&summary.measurements.block_times, 99)
+    );
+    println!(
+        "internal_read_calls: {}",
+        summary.stream_io_stats.read_at_calls
+    );
+    println!(
+        "internal_read_avg_size: {}",
+        summary.stream_io_stats.average_read_size()
+    );
+    println!(
+        "internal_read_avg_latency: {:?}",
+        summary.stream_io_stats.average_read_latency()
+    );
+    println!(
+        "internal_summed_source_time: {:?}",
+        summary.stream_io_stats.read_at_elapsed
+    );
+    println!(
+        "internal_summed_source_rate_mib_s: {:.2}",
+        summary.stream_io_stats.read_throughput_mib_per_second()
+    );
+    println!("--- END SMOKE REPORT SUMMARY ---");
+}
+
 fn env_u64(name: &str, default: u64) -> u64 {
     env::var(name)
         .ok()
@@ -617,6 +731,15 @@ fn percentile_duration(values: &mut [Duration], percentile: usize) -> Duration {
     values.sort_unstable();
     let index = (values.len() * percentile).div_ceil(100).saturating_sub(1);
     values[index]
+}
+
+fn percentile_duration_copy(values: &[Duration], percentile: usize) -> Duration {
+    if values.is_empty() {
+        return Duration::ZERO;
+    }
+
+    let mut values = values.to_vec();
+    percentile_duration(&mut values, percentile)
 }
 
 fn presentation_name(presentation: &MediaPresentation) -> &'static str {

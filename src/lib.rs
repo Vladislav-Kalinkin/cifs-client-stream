@@ -1340,6 +1340,7 @@ pub fn is_media_entry(entry: &DirInfo) -> bool {
     if is_hidden_entry(entry) {
         return false;
     }
+
     if entry.attributes.contains(ExtFileAttr::DIRECTORY) {
         return true;
     }
@@ -1349,6 +1350,38 @@ pub fn is_media_entry(entry: &DirInfo) -> bool {
     };
 
     is_media_extension(extension) && !is_subtitle_extension(extension)
+}
+
+fn is_hidden_entry(entry: &DirInfo) -> bool {
+    is_ignored_system_name(&entry.filename)
+        || entry.filename.starts_with('.')
+        || entry
+            .attributes
+            .intersects(ExtFileAttr::HIDDEN | ExtFileAttr::SYSTEM)
+}
+
+fn is_ignored_system_name(name: &str) -> bool {
+    let name = name.trim();
+
+    if name.is_empty() {
+        return true;
+    }
+
+    let lower = name.to_ascii_lowercase();
+
+    matches!(
+        lower.as_str(),
+        ".ds_store"
+            | ".trashes"
+            | ".spotlight-v100"
+            | ".fseventsd"
+            | "@eadir"
+            | "$recycle.bin"
+            | "system volume information"
+            | "temporary items"
+            | "network trash folder"
+            | "thevolumesettingsfolder"
+    )
 }
 
 pub fn retain_media_entries(entries: &mut Vec<DirInfo>) {
@@ -1825,13 +1858,6 @@ fn directory_sort_key(entry: &DirInfo) -> DirectorySortKey {
         file: !entry.attributes.contains(ExtFileAttr::DIRECTORY),
         name: natural_name_key(&entry.filename),
     }
-}
-
-fn is_hidden_entry(entry: &DirInfo) -> bool {
-    entry.filename.starts_with('.')
-        || entry
-            .attributes
-            .intersects(ExtFileAttr::HIDDEN | ExtFileAttr::SYSTEM)
 }
 
 fn file_extension(filename: &str) -> Option<&str> {
@@ -3000,5 +3026,23 @@ mod tests {
         assert_eq!(stream.stats().playback_position, 50);
         assert_eq!(stream.stats().source_position, 50);
         assert_eq!(stream.stats().buffered, 0);
+    }
+
+    #[test]
+    fn media_filter_rejects_common_system_entries() {
+        for name in [
+            ".DS_Store",
+            ".Trashes",
+            ".Spotlight-V100",
+            ".fseventsd",
+            "@eaDir",
+            "$RECYCLE.BIN",
+            "System Volume Information",
+            "Temporary Items",
+            "Network Trash Folder",
+            "TheVolumeSettingsFolder",
+        ] {
+            assert!(!is_media_entry(&fake_dir_entry(name, true)), "{name}");
+        }
     }
 }

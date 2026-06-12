@@ -33,6 +33,9 @@ async fn run() -> Result<(), Error> {
         )
     })?;
     let host = env::var("SMB_HOST").ok();
+    let user = env::var("SMB_USER").ok();
+    let password = env::var("SMB_PASSWORD").ok();
+    let domain = env::var("SMB_DOMAIN").ok();
     let read_path = env::var("SMB_READ_PATH").ok();
     let timeout = env_u64("SMB_TIMEOUT_MS", DEFAULT_TIMEOUT_MS);
     let read_bytes = env_usize("SMB_READ_BYTES", DEFAULT_READ_BYTES);
@@ -41,14 +44,13 @@ async fn run() -> Result<(), Error> {
 
     let config = resolve_smb_uri(&uri)?;
     let connect_host = host.as_deref().unwrap_or(config.hostname);
-    let auth = config.user.map(|user| {
-        Auth::new(
-            user,
-            "CIFSCLIENT",
-            config.domain.unwrap_or(config.hostname),
-            config.password.unwrap_or(""),
-        )
-    });
+    let auth_user = user.as_deref().or(config.user);
+    let auth_password = password.as_deref().or(config.password).unwrap_or("");
+    let auth_domain = domain
+        .as_deref()
+        .or(config.domain)
+        .unwrap_or(config.hostname);
+    let auth = auth_user.map(|user| Auth::new(user, "CIFSCLIENT", auth_domain, auth_password));
 
     let mut cifs = Cifs::open_timeout(connect_host, config.port, auth, timeout).await?;
     let mount_path = format!("\\\\{}\\{}", connect_host, config.share);

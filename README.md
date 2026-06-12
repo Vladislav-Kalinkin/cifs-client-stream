@@ -1,38 +1,141 @@
-# A minimal, Rust-native CIFS client library
+# cifs-client-stream
 
-This project was born from the need at [RE:](https://www.r-ecosystem.de/) to connect to SMBv1 shares.
+Временное рабочее README на русском языке. Проект основан на
+[`re-gmbh/cifs-client`](https://github.com/re-gmbh/cifs-client), но этот форк
+развивается как read-only SMB1 backend для будущего медиаплеера под Apple TV.
 
-As such, the implementation herein is not planned to become a fully-fledged SMB & CIFS implementation but driven by our very specific needs. Nonetheless we're open to contributions and hope that this library might help others with similar needs.
+## Цель
 
-## Features
+Сделать стабильное и быстрое SMB1-чтение для Apple TV медиаплеера:
 
-- connect to SMBv1 servers
-- authenticate via NTLM using domain, username & password
-- download files
+- основной сервер: AirPort Extreme с внешним HDD по USB;
+- основные клиенты: Apple TV HD 2015 на tvOS 17 и Apple TV 4K на tvOS 26;
+- основной сценарий: просмотр видео из SMB1-шары без записи на сервер;
+- важные требования: без `unsafe`, высокая скорость sequential read, понятная
+  архитектура без устаревшего лишнего кода.
 
-## Smoke test
+SMB1 выбран осознанно, потому что AirPort Extreme и старые сетевые диски часто
+живут именно в таком режиме. Позже возможен SMB2/3 слой, но сейчас фокус на
+качественном SMB1-first backend.
 
-Run a real SMB1 read-only smoke test from macOS without tvOS or Xcode:
+## Текущее состояние
+
+Уже есть:
+
+- подключение к SMB1-шаре;
+- NTLM-аутентификация;
+- read-only mount/list/read;
+- классификация файлов для медиатеки;
+- фильтрация скрытых файлов, субтитров и немедийных расширений;
+- сортировка директорий и файлов для быстрого UI;
+- распознавание папок-фильмов, где внутри лежит основной видеофайл;
+- bounded read-ahead для потокового чтения;
+- таймауты операций;
+- базовая классификация ошибок: timeout, network, server, auth;
+- smoke-тест для реального SMB1-чтения без Xcode/tvOS.
+
+Реальное подключение к AirPort Extreme уже проверено. Чтение файла с шары
+работает. На тесте 4K WEB-DL около 20 GB было получено примерно `3.40 MiB/s`
+на 16 блоках по `262144` байт. Это не финальная производительность, а текущая
+точка измерения.
+
+## Smoke-тест SMB1
+
+Команда для проверки листинга и чтения реального файла:
 
 ```sh
-SMB_URI='smb://user:password@router/share/Movies' \
-SMB_HOST='192.168.1.1' \
-SMB_READ_PATH='Movies/Sample.mkv' \
+SMB_URI='smb://user:password@10.0.1.1/HARD' \
+SMB_HOST='10.0.1.1' \
+SMB_READ_PATH='/path/to/movie.mkv' \
+SMB_READ_BYTES=262144 \
+SMB_READ_BLOCKS=16 \
 cargo run --bin smb_smoke
 ```
 
-`SMB_URI` is required. `SMB_HOST` is optional and overrides the host from `SMB_URI` when DNS lookup does not work. `SMB_READ_PATH` is optional and reads the first block of a file through the streaming path. Optional tuning:
+`SMB_URI` можно писать и без логина/пароля, если передать их отдельно:
 
 ```sh
-SMB_TIMEOUT_MS=5000
-SMB_READ_BYTES=262144
-SMB_READ_BLOCKS=4
+SMB_URI='smb://10.0.1.1/HARD' \
+SMB_HOST='10.0.1.1' \
+SMB_USER='user' \
+SMB_PASSWORD='password' \
+SMB_READ_PATH='/path/to/movie.mkv' \
+SMB_READ_BYTES=262144 \
+SMB_READ_BLOCKS=16 \
+cargo run --bin smb_smoke
 ```
 
-With `SMB_READ_BLOCKS`, the smoke test prints per-block latency and throughput plus the overall average.
+Если нужен домен/workgroup:
 
-## Contributing
+```sh
+SMB_DOMAIN='WORKGROUP'
+```
 
-If you find that there's some feature not covered by this implementation, or you happen to find a bug, we'll welcome pull requests with your improvements.
+Для AirPort Extreme обычно:
 
-In case you want to get in touch and discuss some specific aspects, feel free to use the [discussions feature at Github](https://github.com/re-gmbh/cifs/discussions/).
+- `SMB_HOST='10.0.1.1'`;
+- `HARD` - имя SMB-шары, если диск в сети виден как `HARD`;
+- `SMB_READ_PATH` - путь к файлу внутри шары;
+- `SMB_READ_BLOCKS=16` - короткий sequential read тест;
+- `SMB_READ_BLOCKS=128` или больше - более честный тест стабильности.
+
+Если нужно проверить только список папки, убери `SMB_READ_PATH`.
+
+## Вывод smoke-теста
+
+При чтении файла `smb_smoke` печатает каждый блок:
+
+```text
+block 1 read 262144 bytes in 91.2ms (2.74 MiB/s) at source_position=262144 buffered=0
+```
+
+В конце печатается общий результат:
+
+```text
+read 4194304 bytes from /dir/movie.mkv in 1.17s (3.40 MiB/s), slowest block 98ms
+```
+
+Смотреть нужно не только на среднюю скорость, но и на самый медленный блок.
+Для стриминга важна стабильность: редкие сильные просадки хуже, чем просто
+средняя скорость ниже ожидаемой.
+
+## Локальная проверка без SMB
+
+Перед коммитом достаточно:
+
+```sh
+cargo fmt
+cargo check
+cargo clippy --all-targets --all-features
+cargo test
+```
+
+`cargo fmt --check` не нужен в этом рабочем процессе: форматируем сразу.
+
+## Важные ограничения
+
+- Проект должен оставаться без `unsafe`, если задачу можно решить безопасным Rust.
+- Пишем маленькими шагами, но несколько связанных микрошагов можно делать одним
+  коммитом.
+- Для медиаплеера серверная запись сейчас не нужна. Метаданные, обложки,
+  кэш и синхронизацию лучше проектировать отдельно, не через запись в SMB-шару.
+- Не надо хранить в памяти историю всех пройденных папок и просмотренных видео.
+  UI должен освобождать старые списки при переходах, чтобы не копить память.
+- `.gitignore`-файлы без явной причины не читать и не трогать.
+
+## Ближайший план
+
+1. Довести streaming read: подобрать chunk/read-ahead стратегию под AirPort
+   Extreme и USB-диск.
+2. Добавить длинные smoke-тесты: много блоков, средняя скорость, p95/p99,
+   худший блок.
+3. Подготовить API, который позже удобно вызвать из Swift/SwiftUI через FFI.
+4. Отделить SMB backend от будущей медиатеки и UI.
+5. Позже спроектировать SMB2/3 как отдельный backend, не ломая SMB1-first слой.
+
+## Ожидания по 4K
+
+4K WEB-DL около 20 GB потенциально реалистичнее, чем 4K remux. Для стабильного
+просмотра важно не только среднее `MiB/s`, но и отсутствие длинных пауз. Текущий
+результат уже доказывает рабочее чтение, но для уровня медиаплеера нужно ещё
+доработать буферизацию, измерения и интеграционный API.

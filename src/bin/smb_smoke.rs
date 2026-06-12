@@ -3,8 +3,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use cifs_client::{
-    media_presentations, resolve_smb_uri, Auth, Cifs, Error, MediaPresentation, StreamOptions,
-    StreamingWorkerOptions,
+    media_presentations, resolve_smb_uri, Auth, Cifs, Error, MediaPresentation, ReadAheadStats,
+    StreamOptions, StreamingWorkerOptions, StreamingWorkerStats,
 };
 
 const DEFAULT_READ_BYTES: usize = 256 * 1024;
@@ -49,8 +49,10 @@ async fn run() -> Result<(), Error> {
     );
     let chunk_size = env_u16("SMB_CHUNK_SIZE", default_stream_options.chunk_size);
     let stream_options = StreamOptions::new(read_ahead_bytes, chunk_size)?;
+
     let legacy_read_ahead = env_bool("SMB_LEGACY_READ_AHEAD", false);
     let print_entries = env_bool("SMB_PRINT_ENTRIES", false);
+    let print_blocks = env_bool("SMB_PRINT_BLOCKS", false);
     let worker_initial_buffer = env_usize("SMB_WORKER_INITIAL_BUFFER_BYTES", 1024 * 1024);
 
     let timeout = Duration::from_millis(timeout);
@@ -111,7 +113,7 @@ async fn run() -> Result<(), Error> {
 
     if let Some(path) = read_path {
         println!(
-            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} chunk_size={} mode={}",
+            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} chunk_size={} mode={} print_blocks={}",
             read_bytes,
             read_blocks,
             stream_options.read_ahead_capacity,
@@ -120,22 +122,16 @@ async fn run() -> Result<(), Error> {
                 "legacy-read-ahead"
             } else {
                 "streaming-worker"
-            }
+            },
+            print_blocks
         );
 
         if legacy_read_ahead {
             let mut stream = cifs
                 .open_read_ahead_with_options(&share, &path, stream_options)
                 .await?;
-
             let started = Instant::now();
-            let mut total = 0usize;
-            let mut slowest = Duration::ZERO;
-            let mut block_times = Vec::with_capacity(read_blocks);
-            let mut refill_times = Vec::new();
-            let mut cached_times = Vec::new();
-            let mut refill_bytes = 0usize;
-            let mut cached_bytes = 0usize;
+            let mut measurements = SmokeMeasurements::new(read_blocks);
 
             for block_index in 0..read_blocks {
                 let before = stream.stats();
@@ -152,98 +148,17 @@ async fn run() -> Result<(), Error> {
                     break;
                 }
 
-                total += block.len();
-                slowest = slowest.max(block_elapsed);
-                block_times.push(block_elapsed);
-
-                let source_delta =
-                    after.source_position.saturating_sub(before.source_position) as usize;
-
-                if source_delta > 0 {
-                    refill_times.push(block_elapsed);
-                    refill_bytes += source_delta;
-                } else {
-                    cached_times.push(block_elapsed);
-                    cached_bytes += block.len();
-                }
-
-                let block_mbps = if block_elapsed.is_zero() {
-                    0.0
-                } else {
-                    (block.len() as f64 / (1024.0 * 1024.0)) / block_elapsed.as_secs_f64()
-                };
-
-                println!(
-                    concat!(
-                        "block {} read {} bytes in {:?} ({:.2} MiB/s) ",
-                        "playback {}->{} source {}->{} source_delta={} ",
-                        "prefetched={} buffered={} chunks={} remaining={}"
-                    ),
-                    block_index + 1,
+                measurements.record_block(
+                    block_index,
                     block.len(),
                     block_elapsed,
-                    block_mbps,
-                    before.position,
-                    after.position,
-                    before.source_position,
-                    after.source_position,
-                    source_delta,
-                    after.prefetched(),
-                    after.buffered,
-                    after.buffered_chunks,
-                    after.remaining()
+                    SmokeBlockStats::from_read_ahead(&before),
+                    SmokeBlockStats::from_read_ahead(&after),
+                    print_blocks,
                 );
             }
 
-            let elapsed = started.elapsed();
-            let mbps = if elapsed.is_zero() {
-                0.0
-            } else {
-                (total as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
-            };
-
-            println!(
-                "read {} bytes from {} in {:?} ({:.2} MiB/s), slowest block {:?}",
-                total, path, elapsed, mbps, slowest
-            );
-
-            if !refill_times.is_empty() {
-                let refill_elapsed: Duration = refill_times.iter().copied().sum();
-                let refill_mbps = if refill_elapsed.is_zero() {
-                    0.0
-                } else {
-                    (refill_bytes as f64 / (1024.0 * 1024.0)) / refill_elapsed.as_secs_f64()
-                };
-
-                println!(
-                    "refill blocks: {} source bytes {} in {:?} ({:.2} MiB/s), p95 {:?}, p99 {:?}",
-                    refill_times.len(),
-                    refill_bytes,
-                    refill_elapsed,
-                    refill_mbps,
-                    percentile_duration(&mut refill_times, 95),
-                    percentile_duration(&mut refill_times, 99)
-                );
-            }
-
-            if !cached_times.is_empty() {
-                println!(
-                    "cached blocks: {} delivered bytes {}, p95 {:?}, p99 {:?}",
-                    cached_times.len(),
-                    cached_bytes,
-                    percentile_duration(&mut cached_times, 95),
-                    percentile_duration(&mut cached_times, 99)
-                );
-            }
-
-            if !block_times.is_empty() {
-                println!(
-                    "block latency: p95 {:?}, p99 {:?}",
-                    percentile_duration(&mut block_times, 95),
-                    percentile_duration(&mut block_times, 99)
-                );
-            }
-
+            measurements.print_summary(&path, started.elapsed());
             cifs.close_read_ahead(stream).await?;
         } else {
             let default_low_watermark = worker_initial_buffer.max(read_bytes);
@@ -252,19 +167,12 @@ async fn run() -> Result<(), Error> {
                 "SMB_HIGH_WATERMARK_BYTES",
                 stream_options.read_ahead_capacity,
             );
-            let worker_options = StreamingWorkerOptions::new(
-                stream_options,
-                low_watermark,
-                high_watermark,
-                read_bytes,
-            )?;
+            let worker_options =
+                StreamingWorkerOptions::new(stream_options, low_watermark, high_watermark)?;
 
             println!(
-                "worker options: low_watermark={} high_watermark={} read_request_size={} initial_buffer={}",
-                worker_options.low_watermark,
-                worker_options.high_watermark,
-                worker_options.read_request_size,
-                worker_initial_buffer
+                "worker options: low_watermark={} high_watermark={} initial_buffer={}",
+                worker_options.low_watermark, worker_options.high_watermark, worker_initial_buffer
             );
 
             let mut worker = cifs
@@ -289,12 +197,6 @@ async fn run() -> Result<(), Error> {
                 initial_prefill_elapsed = initial_elapsed;
                 initial_prefill_bytes = source_delta as usize;
 
-                let initial_mbps = if initial_elapsed.is_zero() {
-                    0.0
-                } else {
-                    (source_delta as f64 / (1024.0 * 1024.0)) / initial_elapsed.as_secs_f64()
-                };
-
                 println!(
                     concat!(
                         "initial worker buffer: source {}->{} source_delta={} ",
@@ -304,30 +206,22 @@ async fn run() -> Result<(), Error> {
                     after.source_position,
                     source_delta,
                     initial_elapsed,
-                    initial_mbps,
+                    mib_per_second(initial_prefill_bytes, initial_elapsed),
                     after.buffered,
                     after.buffered_chunks
                 );
             }
 
             let started = Instant::now();
-            let mut total = 0usize;
-            let mut slowest = Duration::ZERO;
-            let mut block_times = Vec::with_capacity(read_blocks);
-            let mut refill_times = Vec::new();
-            let mut cached_times = Vec::new();
-            let mut refill_bytes = 0usize;
-            let mut cached_bytes = 0usize;
+            let mut measurements = SmokeMeasurements::new(read_blocks);
 
             for block_index in 0..read_blocks {
                 let before = worker.stats();
                 let block_started = Instant::now();
-
                 let block = worker
                     .read_block_timeout(&mut cifs, read_bytes, timeout)
                     .await?
                     .unwrap_or_default();
-
                 let block_elapsed = block_started.elapsed();
                 let after = worker.stats();
 
@@ -336,119 +230,28 @@ async fn run() -> Result<(), Error> {
                     break;
                 }
 
-                total += block.len();
-                slowest = slowest.max(block_elapsed);
-                block_times.push(block_elapsed);
-
-                let source_delta =
-                    after.source_position.saturating_sub(before.source_position) as usize;
-
-                if source_delta > 0 {
-                    refill_times.push(block_elapsed);
-                    refill_bytes += source_delta;
-                } else {
-                    cached_times.push(block_elapsed);
-                    cached_bytes += block.len();
-                }
-
-                let block_mbps = if block_elapsed.is_zero() {
-                    0.0
-                } else {
-                    (block.len() as f64 / (1024.0 * 1024.0)) / block_elapsed.as_secs_f64()
-                };
-
-                println!(
-                    concat!(
-                        "block {} read {} bytes in {:?} ({:.2} MiB/s) ",
-                        "playback {}->{} source {}->{} source_delta={} ",
-                        "prefetched={} buffered={} chunks={} remaining={}"
-                    ),
-                    block_index + 1,
+                measurements.record_block(
+                    block_index,
                     block.len(),
                     block_elapsed,
-                    block_mbps,
-                    before.playback_position,
-                    after.playback_position,
-                    before.source_position,
-                    after.source_position,
-                    source_delta,
-                    after.prefetched(),
-                    after.buffered,
-                    after.buffered_chunks,
-                    after.remaining()
+                    SmokeBlockStats::from_worker(&before),
+                    SmokeBlockStats::from_worker(&after),
+                    print_blocks,
                 );
             }
 
             let elapsed = started.elapsed();
-            let mbps = if elapsed.is_zero() {
-                0.0
-            } else {
-                (total as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
-            };
-
-            println!(
-                "read {} bytes from {} in {:?} ({:.2} MiB/s), slowest block {:?}",
-                total, path, elapsed, mbps, slowest
-            );
+            measurements.print_summary(&path, elapsed);
 
             if worker_initial_buffer > 0 {
                 let total_with_initial = elapsed + initial_prefill_elapsed;
-                let delivered_mbps_with_initial = if total_with_initial.is_zero() {
-                    0.0
-                } else {
-                    (total as f64 / (1024.0 * 1024.0)) / total_with_initial.as_secs_f64()
-                };
-                let source_mbps_with_initial = if initial_prefill_elapsed.is_zero() {
-                    0.0
-                } else {
-                    (initial_prefill_bytes as f64 / (1024.0 * 1024.0))
-                        / initial_prefill_elapsed.as_secs_f64()
-                };
-
                 println!(
                     "total including initial buffer: delivered={} bytes in {:?} ({:.2} MiB/s delivered), initial_buffer={} bytes ({:.2} MiB/s source)",
-                    total,
+                    measurements.total,
                     total_with_initial,
-                    delivered_mbps_with_initial,
+                    mib_per_second(measurements.total, total_with_initial),
                     initial_prefill_bytes,
-                    source_mbps_with_initial
-                );
-            }
-
-            if !refill_times.is_empty() {
-                let refill_elapsed: Duration = refill_times.iter().copied().sum();
-                let refill_mbps = if refill_elapsed.is_zero() {
-                    0.0
-                } else {
-                    (refill_bytes as f64 / (1024.0 * 1024.0)) / refill_elapsed.as_secs_f64()
-                };
-
-                println!(
-                    "refill blocks: {} source bytes {} in {:?} ({:.2} MiB/s), p95 {:?}, p99 {:?}",
-                    refill_times.len(),
-                    refill_bytes,
-                    refill_elapsed,
-                    refill_mbps,
-                    percentile_duration(&mut refill_times, 95),
-                    percentile_duration(&mut refill_times, 99)
-                );
-            }
-
-            if !cached_times.is_empty() {
-                println!(
-                    "cached blocks: {} delivered bytes {}, p95 {:?}, p99 {:?}",
-                    cached_times.len(),
-                    cached_bytes,
-                    percentile_duration(&mut cached_times, 95),
-                    percentile_duration(&mut cached_times, 99)
-                );
-            }
-
-            if !block_times.is_empty() {
-                println!(
-                    "block latency: p95 {:?}, p99 {:?}",
-                    percentile_duration(&mut block_times, 95),
-                    percentile_duration(&mut block_times, 99)
+                    mib_per_second(initial_prefill_bytes, initial_prefill_elapsed)
                 );
             }
 
@@ -458,6 +261,156 @@ async fn run() -> Result<(), Error> {
 
     cifs.umount(share).await?;
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct SmokeBlockStats {
+    source_position: u64,
+    prefetched: u64,
+    buffered: usize,
+    buffered_chunks: usize,
+    remaining: u64,
+}
+
+impl SmokeBlockStats {
+    fn from_read_ahead(stats: &ReadAheadStats) -> Self {
+        Self {
+            source_position: stats.source_position,
+            prefetched: stats.prefetched(),
+            buffered: stats.buffered,
+            buffered_chunks: stats.buffered_chunks,
+            remaining: stats.remaining(),
+        }
+    }
+
+    fn from_worker(stats: &StreamingWorkerStats) -> Self {
+        Self {
+            source_position: stats.source_position,
+            prefetched: stats.prefetched(),
+            buffered: stats.buffered,
+            buffered_chunks: stats.buffered_chunks,
+            remaining: stats.remaining(),
+        }
+    }
+}
+
+struct SmokeMeasurements {
+    total: usize,
+    slowest: Duration,
+    block_times: Vec<Duration>,
+    refill_times: Vec<Duration>,
+    cached_times: Vec<Duration>,
+    refill_bytes: usize,
+    cached_bytes: usize,
+}
+
+impl SmokeMeasurements {
+    fn new(read_blocks: usize) -> Self {
+        Self {
+            total: 0,
+            slowest: Duration::ZERO,
+            block_times: Vec::with_capacity(read_blocks),
+            refill_times: Vec::new(),
+            cached_times: Vec::new(),
+            refill_bytes: 0,
+            cached_bytes: 0,
+        }
+    }
+
+    fn record_block(
+        &mut self,
+        block_index: usize,
+        block_len: usize,
+        block_elapsed: Duration,
+        before: SmokeBlockStats,
+        after: SmokeBlockStats,
+        print_blocks: bool,
+    ) {
+        self.total += block_len;
+        self.slowest = self.slowest.max(block_elapsed);
+        self.block_times.push(block_elapsed);
+
+        let source_delta = after.source_position.saturating_sub(before.source_position) as usize;
+        if source_delta > 0 {
+            self.refill_times.push(block_elapsed);
+            self.refill_bytes += source_delta;
+        } else {
+            self.cached_times.push(block_elapsed);
+            self.cached_bytes += block_len;
+        }
+
+        if print_blocks {
+            println!(
+                concat!(
+                    "block {} read {} bytes in {:?} ({:.2} MiB/s) ",
+                    "source {}->{} source_delta={} ",
+                    "prefetched={} buffered={} chunks={} remaining={}"
+                ),
+                block_index + 1,
+                block_len,
+                block_elapsed,
+                mib_per_second(block_len, block_elapsed),
+                before.source_position,
+                after.source_position,
+                source_delta,
+                after.prefetched,
+                after.buffered,
+                after.buffered_chunks,
+                after.remaining
+            );
+        }
+    }
+
+    fn print_summary(&mut self, path: &str, elapsed: Duration) {
+        println!(
+            "read {} bytes from {} in {:?} ({:.2} MiB/s), slowest block {:?}",
+            self.total,
+            path,
+            elapsed,
+            mib_per_second(self.total, elapsed),
+            self.slowest
+        );
+
+        if !self.refill_times.is_empty() {
+            let refill_elapsed: Duration = self.refill_times.iter().copied().sum();
+
+            println!(
+                "refill blocks: {} source bytes {} in {:?} ({:.2} MiB/s), p95 {:?}, p99 {:?}",
+                self.refill_times.len(),
+                self.refill_bytes,
+                refill_elapsed,
+                mib_per_second(self.refill_bytes, refill_elapsed),
+                percentile_duration(&mut self.refill_times, 95),
+                percentile_duration(&mut self.refill_times, 99)
+            );
+        }
+
+        if !self.cached_times.is_empty() {
+            println!(
+                "cached blocks: {} delivered bytes {}, p95 {:?}, p99 {:?}",
+                self.cached_times.len(),
+                self.cached_bytes,
+                percentile_duration(&mut self.cached_times, 95),
+                percentile_duration(&mut self.cached_times, 99)
+            );
+        }
+
+        if !self.block_times.is_empty() {
+            println!(
+                "block latency: p95 {:?}, p99 {:?}",
+                percentile_duration(&mut self.block_times, 95),
+                percentile_duration(&mut self.block_times, 99)
+            );
+        }
+    }
+}
+
+fn mib_per_second(bytes: usize, elapsed: Duration) -> f64 {
+    if elapsed.is_zero() {
+        0.0
+    } else {
+        (bytes as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
+    }
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {

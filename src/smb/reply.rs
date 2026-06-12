@@ -6,7 +6,6 @@ use crate::win::*;
 
 use super::common::*;
 use super::info::*;
-use super::trans;
 use super::Error;
 
 /// Helper struct holding all relevant information of a reply
@@ -374,64 +373,6 @@ impl Reply for Read {
         let file_data = data.copy_to_bytes(length);
 
         Ok(Read { data: file_data })
-    }
-}
-
-/// Reply to SMB_COM_NT_TRANSACT, see 2.2.4.62.2
-pub struct Transact<T> {
-    pub subcmd: T,
-}
-
-impl<T: trans::SubReply> Reply for Transact<T> {
-    const CMD: Cmd = Cmd::Transact;
-    const ANDX: bool = false;
-
-    fn create(mut ctx: ReplyCtx) -> Result<Self, Error> {
-        // parameter
-        ctx.parameter.advance(3);
-        let total_parameter_count = ctx.parameter.get_u32_le() as usize;
-        let total_data_count = ctx.parameter.get_u32_le() as usize;
-
-        let parameter_count = ctx.parameter.get_u32_le() as usize;
-        let raw_parameter_offset = ctx.parameter.get_u32_le() as usize;
-        let _parameter_displacement = ctx.parameter.get_u32_le();
-
-        let data_count = ctx.parameter.get_u32_le() as usize;
-        let raw_data_offset = ctx.parameter.get_u32_le() as usize;
-        let _data_displacement = ctx.parameter.get_u32_le();
-
-        let setup_words = ctx.parameter.get_u8() as usize;
-        let sub_setup = ctx.parameter.copy_to_bytes(2 * setup_words);
-
-        if parameter_count < total_parameter_count || data_count < total_data_count {
-            return Err(Error::Unsupported(
-                "transaction message split to multiple packets".to_owned(),
-            ));
-        }
-
-        // data
-        let sub_parameter = if parameter_count > 0 {
-            let offset =
-                utils::try_sub(raw_parameter_offset, ctx.data_offset).ok_or(Error::InvalidData)?;
-
-            ctx.data.slice(offset..offset + parameter_count)
-        } else {
-            Bytes::new()
-        };
-
-        let sub_data = if data_count > 0 {
-            let offset =
-                utils::try_sub(raw_data_offset, ctx.data_offset).ok_or(Error::InvalidData)?;
-
-            ctx.data.slice(offset..offset + data_count)
-        } else {
-            Bytes::new()
-        };
-
-        // create sub-command response
-        let subcmd = T::parse(sub_setup, sub_parameter, sub_data)?;
-
-        Ok(Transact::<T> { subcmd })
     }
 }
 

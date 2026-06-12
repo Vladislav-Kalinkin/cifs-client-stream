@@ -6,7 +6,6 @@ use crate::win::*;
 use super::common::*;
 use super::info::*;
 use super::reply::Handle;
-use super::trans;
 use super::Error;
 
 pub(crate) trait Msg {
@@ -517,94 +516,6 @@ impl Msg for Read {
         parameter.put_u16_le(0);
 
         parameter.put_u32_le((self.offset >> 32) as u32);
-
-        Ok(())
-    }
-}
-
-/// Parameter for SMB_COM_NT_TRANSACT
-pub(crate) struct Transact<T> {
-    tid: u16,
-    subcmd: T,
-}
-
-impl<T: trans::SubCmd> Transact<T> {
-    pub(crate) fn new(tid: u16, subcmd: T) -> Self {
-        Self { tid, subcmd }
-    }
-}
-
-impl<T: trans::SubCmd> Msg for Transact<T> {
-    const CMD: Cmd = Cmd::Transact;
-    const ANDX: bool = false;
-
-    fn fix_header(&self, info: &mut Info) {
-        info.tid = self.tid;
-    }
-
-    fn body(
-        &self,
-        _info: &Info,
-        parameter: &mut BytesMut,
-        data: &mut BytesMut,
-    ) -> Result<(), Error> {
-        // serialize sub command
-        let sub_setup = self.subcmd.setup()?;
-        let sub_setup_words: u8 = (sub_setup.len() / 2).try_into().map_err(|_| {
-            Error::CreatePacket("setup of transaction sub-command is too large".to_owned())
-        })?;
-
-        let sub_parameter = self.subcmd.parameter()?;
-        let sub_parameter_len: u32 = sub_parameter.len().try_into().map_err(|_| {
-            Error::CreatePacket("parameter of transaction sub-command is too large".to_owned())
-        })?;
-
-        let sub_data = self.subcmd.data()?;
-        let sub_data_len: u32 = sub_data.len().try_into().map_err(|_| {
-            Error::CreatePacket("data of transaction sub-command is too large".to_owned())
-        })?;
-
-        // position of data relative to SMB header
-        let data_start = SMB_HEADER_LEN + 1 + 38 + sub_setup.len() + 2;
-
-        // sub parameter start at the first 32bit-aligned position in data
-        let sub_parameter_offset = 4 * data_start.div_ceil(4);
-        // sub data start at the next 32bit-aligned position after sub parameter
-        let sub_data_offset = 4 * (sub_parameter_offset + sub_parameter.len()).div_ceil(4);
-
-        // parameter
-        parameter.put_u8(T::MAX_SETUP_COUNT);
-        parameter.put_u16_le(0); // reserved
-
-        // the following are total counts, if mutiple transact messages
-        // are used to transfer this sub-command. we only send one message
-        // so this is the same as below.
-        parameter.put_u32_le(sub_parameter_len);
-        parameter.put_u32_le(sub_data_len);
-
-        // max parameter count accepted by client
-        parameter.put_u32_le(T::MAX_PARAM_COUNT);
-
-        // max data count accepted by client
-        parameter.put_u32_le(T::MAX_DATA_COUNT);
-
-        parameter.put_u32_le(sub_parameter_len);
-        parameter.put_u32_le(
-            sub_parameter_offset
-                .try_into()
-                .expect("sub_parameter_offset too big"),
-        );
-        parameter.put_u32_le(sub_data_len);
-        parameter.put_u32_le(sub_data_offset.try_into().expect("sub_data_offset too big"));
-        parameter.put_u8(sub_setup_words);
-        parameter.put_u16_le(T::ID);
-        parameter.put(sub_setup);
-
-        // data
-        data.put_bytes(0, (4 - (data_start % 4)) % 4);
-        data.put(sub_parameter);
-        data.put_bytes(0, (4 - (data_start + data.len()) % 4) % 4);
-        data.put(sub_data);
 
         Ok(())
     }

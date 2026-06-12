@@ -199,21 +199,6 @@ bitflags! {
         const EFFECTIVE_ONLY    = 0x02;
     }
 
-    pub struct SmbFileAttr: u16 {
-        const NORMAL            = 0x0000;
-        const READONLY          = 0x0001;
-        const HIDDEN            = 0x0002;
-        const SYSTEM            = 0x0004;
-        const VOLUME            = 0x0008;
-        const DIRECTORY         = 0x0010;
-        const ARCHIVE           = 0x0020;
-        const SEARCH_READONLY   = 0x0100;
-        const SEARCH_HIDDEN     = 0x0200;
-        const SEARCH_SYSTEM     = 0x0400;
-        const SEARCH_DIRECTORY  = 0x1000;
-        const SEARCH_ARCHIVE    = 0x2000;
-    }
-
     pub struct OpLockLevel: u8 {
         const NO_LOCK           = 0x00;
         const EXCLUSIVE         = 0x01;

@@ -198,7 +198,6 @@ pub enum Cmd {
     Negotiate = 0x72,
     SessionSetup = 0x73,
     TreeConnect = 0x75,
-    Transact = 0xa0,
     Create = 0xa2,
     NoCommand = 0xff,
 }

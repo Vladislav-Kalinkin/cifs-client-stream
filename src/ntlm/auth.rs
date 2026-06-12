@@ -98,37 +98,4 @@ mod tests {
 
         assert_eq!(hash, hex!("04b8e0ba74289cc540826bab1dee63ae"));
     }
-
-    /*
-    #[test]
-    fn challenge_response() {
-        let msg_challenge = Bytes::from(hex!(
-                "4e544c4d53535000020000000c000c003000000001028100"
-                "0123456789abcdef0000000000000000620062003c000000"
-                "44004f004d00410049004e0002000c0044004f004d004100"
-                "49004e0001000c0053004500520056004500520004001400"
-                "64006f006d00610069006e002e0063006f006d0003002200"
-                "7300650072007600650072002e0064006f006d0061006900"
-                "6e002e0063006f006d0000000000").as_ref());
-
-        let challenge = ChallengeMsg::parse(&msg_challenge)
-            .expect("can't parse NTLM challenge");
-
-
-        let auth = Auth::new("user", "WORKSTATION", "DOMAIN", "SecREt01");
-        let (_, response) = auth.authenticate(&challenge)
-                                .expect("can't authenticate challenge");
-
-        assert_eq!(&response[..], hex!("cbabbca713eb795d04c97abc01ee4983"
-                                  "01010000000000000090d336b734c301"
-                                  "ffffff00112233440000000002000c00"
-                                  "44004f004d00410049004e0001000c00"
-                                  "53004500520056004500520004001400"
-                                  "64006f006d00610069006e002e006300"
-                                  "6f006d00030022007300650072007600"
-                                  "650072002e0064006f006d0061006900"
-                                  "6e002e0063006f006d00000000000000"
-                                  "0000"));
-    }
-    */
 }

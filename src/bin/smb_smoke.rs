@@ -30,12 +30,14 @@ async fn run() -> Result<(), Error> {
             "SMB_URI is required, for example smb://user:pass@host/share/path".into(),
         )
     })?;
+    let host = env::var("SMB_HOST").ok();
     let read_path = env::var("SMB_READ_PATH").ok();
     let timeout = env_u64("SMB_TIMEOUT_MS", DEFAULT_TIMEOUT_MS);
     let read_bytes = env_usize("SMB_READ_BYTES", DEFAULT_READ_BYTES);
     let timeout = Duration::from_millis(timeout);
 
     let config = resolve_smb_uri(&uri)?;
+    let connect_host = host.as_deref().unwrap_or(config.hostname);
     let auth = config.user.map(|user| {
         Auth::new(
             user,
@@ -45,8 +47,8 @@ async fn run() -> Result<(), Error> {
         )
     });
 
-    let mut cifs = Cifs::open_timeout(config.hostname, config.port, auth, timeout).await?;
-    let mount_path = format!("\\\\{}\\{}", config.hostname, config.share);
+    let mut cifs = Cifs::open_timeout(connect_host, config.port, auth, timeout).await?;
+    let mount_path = format!("\\\\{}\\{}", connect_host, config.share);
     let share = cifs.mount(&mount_path).await?;
 
     let pattern = match config.path {
@@ -63,6 +65,12 @@ async fn run() -> Result<(), Error> {
     let presentations = media_presentations(&entries);
 
     println!("connected to {mount_path}");
+    if connect_host != config.hostname {
+        println!(
+            "resolved uri host {} via SMB_HOST {connect_host}",
+            config.hostname
+        );
+    }
     println!("listed pattern: {pattern}");
     println!("media entries in first batch: {}", entries.len());
     for (entry, presentation) in entries

@@ -16,11 +16,12 @@ Run a real SMB1 read-only smoke test from macOS without tvOS or Xcode:
 
 ```sh
 SMB_URI='smb://user:password@router/share/Movies' \
+SMB_HOST='192.168.1.1' \
 SMB_READ_PATH='Movies/Sample.mkv' \
 cargo run --bin smb_smoke
 ```
 
-`SMB_URI` is required. `SMB_READ_PATH` is optional and reads the first block of a file through the streaming path. Optional tuning:
+`SMB_URI` is required. `SMB_HOST` is optional and overrides the host from `SMB_URI` when DNS lookup does not work. `SMB_READ_PATH` is optional and reads the first block of a file through the streaming path. Optional tuning:
 
 ```sh
 SMB_TIMEOUT_MS=5000

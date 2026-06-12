@@ -654,6 +654,22 @@ impl MediaPresentation {
             (MediaKind::Audio | MediaKind::Video, _) => Self::PlayableFile { index },
         }
     }
+
+    pub fn index(&self) -> usize {
+        match self {
+            Self::Folder { index }
+            | Self::MovieFolder { index, .. }
+            | Self::PlayableFile { index } => *index,
+        }
+    }
+
+    pub fn is_movie_folder(&self) -> bool {
+        matches!(self, Self::MovieFolder { .. })
+    }
+
+    pub fn is_playable(&self) -> bool {
+        matches!(self, Self::MovieFolder { .. } | Self::PlayableFile { .. })
+    }
 }
 
 pub fn media_presentations(entries: &[MediaEntry]) -> Vec<MediaPresentation> {
@@ -661,6 +677,19 @@ pub fn media_presentations(entries: &[MediaEntry]) -> Vec<MediaPresentation> {
         .iter()
         .enumerate()
         .map(|(index, entry)| MediaPresentation::from_entry(index, entry, None))
+        .collect()
+}
+
+pub fn media_presentations_with_summaries(
+    entries: &[MediaEntry],
+    folder_summaries: &[(usize, MediaFolderSummary)],
+) -> Vec<MediaPresentation> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            MediaPresentation::from_entry(index, entry, folder_summary(folder_summaries, index))
+        })
         .collect()
 }
 
@@ -1204,6 +1233,16 @@ fn read_count_for(remaining: u64) -> u16 {
     remaining.min(u64::from(SMB_READ_MAX)) as u16
 }
 
+fn folder_summary(
+    folder_summaries: &[(usize, MediaFolderSummary)],
+    index: usize,
+) -> Option<MediaFolderSummary> {
+    folder_summaries
+        .iter()
+        .find(|(folder_index, _)| *folder_index == index)
+        .map(|(_, summary)| summary.clone())
+}
+
 fn last_filename(info: &[DirInfo]) -> Option<String> {
     info.last().map(|entry| entry.filename.clone())
 }
@@ -1392,9 +1431,9 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 mod tests {
     use super::{
         is_likely_extra_video, is_media_entry, main_video_index, media_presentations,
-        read_count_for, resolve_smb_uri, retain_media_entries, seek_position, sort_dir_entries,
-        MediaEntry, MediaFolderSummary, MediaKind, MediaPresentation, ReadAhead, StreamOptions,
-        SMB_READ_MAX,
+        media_presentations_with_summaries, read_count_for, resolve_smb_uri, retain_media_entries,
+        seek_position, sort_dir_entries, MediaEntry, MediaFolderSummary, MediaKind,
+        MediaPresentation, ReadAhead, StreamOptions, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -1757,6 +1796,36 @@ mod tests {
             MediaPresentation::from_entry(4, &folder, Some(summary.clone())),
             MediaPresentation::MovieFolder { index: 4, summary }
         );
+    }
+
+    #[test]
+    fn media_presentations_apply_folder_summaries_by_index() {
+        let entries = vec![
+            fake_media_entry("Movie Folder", 0, MediaKind::Folder),
+            fake_media_entry("Season Folder", 0, MediaKind::Folder),
+            fake_media_entry("Loose Movie.mkv", 10_000, MediaKind::Video),
+        ];
+        let summary = MediaFolderSummary {
+            main_video: Some(0),
+            extras: vec![1],
+            audio_tracks: vec![],
+        };
+
+        let presentations = media_presentations_with_summaries(&entries, &[(0, summary.clone())]);
+
+        assert_eq!(
+            presentations,
+            vec![
+                MediaPresentation::MovieFolder { index: 0, summary },
+                MediaPresentation::Folder { index: 1 },
+                MediaPresentation::PlayableFile { index: 2 },
+            ]
+        );
+        assert_eq!(presentations[0].index(), 0);
+        assert!(presentations[0].is_movie_folder());
+        assert!(presentations[0].is_playable());
+        assert!(!presentations[1].is_playable());
+        assert!(presentations[2].is_playable());
     }
 
     #[test]

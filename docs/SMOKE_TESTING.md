@@ -36,6 +36,7 @@ SMB_PASSWORD                     password
 SMB_DOMAIN                       optional workgroup/domain
 SMB_LIST_PATH                    directory path inside the share
 SMB_READ_PATH                    file path inside the share
+SMB_REPORT_PATH                  optional path to save the final smoke report summary
 SMB_READ_BYTES                   read block size, default 256 KiB
 SMB_READ_BLOCKS                  number of blocks to read
 SMB_READ_AHEAD_BYTES             stream capacity ceiling, default 8 MiB

@@ -40,6 +40,7 @@ async fn run() -> Result<(), Error> {
     let domain = env::var("SMB_DOMAIN").ok();
     let read_path = env::var("SMB_READ_PATH").ok();
     let list_path_env = env::var("SMB_LIST_PATH").ok();
+    let report_path = env::var("SMB_REPORT_PATH").ok();
     let timeout = env_u64("SMB_TIMEOUT_MS", DEFAULT_TIMEOUT_MS);
     let read_bytes = env_usize("SMB_READ_BYTES", DEFAULT_READ_BYTES);
     let read_blocks = env_usize("SMB_READ_BLOCKS", DEFAULT_READ_BLOCKS);
@@ -336,7 +337,7 @@ async fn run() -> Result<(), Error> {
             );
         }
 
-        print_report_summary(SmokeReportSummary {
+        let report_summary = format_report_summary(SmokeReportSummary {
             path: &path,
             read_bytes,
             read_blocks,
@@ -348,6 +349,10 @@ async fn run() -> Result<(), Error> {
             initial_prefill_elapsed,
             stream_io_stats,
         });
+
+        print!("{report_summary}");
+
+        save_report_summary_if_requested(report_path.as_deref(), &report_summary)?;
 
         cifs.close_media_stream(media_stream).await?;
     }
@@ -605,90 +610,86 @@ fn print_io_stats(label: &str, stats: CifsIoStats) {
     );
 }
 
-fn print_report_summary(summary: SmokeReportSummary<'_>) {
+fn format_report_summary(summary: SmokeReportSummary<'_>) -> String {
     let total_elapsed = summary.read_elapsed + summary.initial_prefill_elapsed;
 
-    println!();
-    println!("--- SMOKE REPORT SUMMARY ---");
-    println!("read_path: {}", summary.path);
-    println!("read_bytes: {}", summary.read_bytes);
-    println!("read_blocks_requested: {}", summary.read_blocks);
-    println!("delivered_bytes: {}", summary.measurements.total);
-    println!(
-        "configured_chunk_size: {}",
-        summary.stream_options.chunk_size
-    );
-    println!(
-        "effective_chunk_size: {}",
-        summary.stream_options.effective_chunk_size()
-    );
-    println!(
-        "read_ahead_capacity: {}",
-        summary.stream_options.read_ahead_capacity
-    );
-    println!(
-        "initial_buffer: {}",
-        summary.media_stream_options.initial_buffer_size
-    );
-    println!(
-        "low_watermark: {}",
-        summary.media_stream_options.worker_options.low_watermark
-    );
-    println!(
-        "high_watermark: {}",
-        summary.media_stream_options.worker_options.high_watermark
-    );
-    println!(
-        "pipeline_depth: {}",
-        summary.media_stream_options.worker_options.pipeline_depth
-    );
-    println!(
-        "initial_buffer_mib_s: {:.2}",
+    format!(
+        concat!(
+            "\n",
+            "--- SMOKE REPORT SUMMARY ---\n",
+            "read_path: {}\n",
+            "read_bytes: {}\n",
+            "read_blocks_requested: {}\n",
+            "delivered_bytes: {}\n",
+            "configured_chunk_size: {}\n",
+            "effective_chunk_size: {}\n",
+            "read_ahead_capacity: {}\n",
+            "initial_buffer: {}\n",
+            "low_watermark: {}\n",
+            "high_watermark: {}\n",
+            "pipeline_depth: {}\n",
+            "initial_buffer_mib_s: {:.2}\n",
+            "read_phase_mib_s: {:.2}\n",
+            "total_mib_s: {:.2}\n",
+            "slowest_block: {:?}\n",
+            "refill_blocks: {}\n",
+            "cached_blocks: {}\n",
+            "block_latency_p95: {:?}\n",
+            "block_latency_p99: {:?}\n",
+            "internal_read_calls: {}\n",
+            "internal_read_avg_size: {}\n",
+            "internal_read_avg_latency: {:?}\n",
+            "internal_summed_source_time: {:?}\n",
+            "internal_summed_source_rate_mib_s: {:.2}\n",
+            "--- END SMOKE REPORT SUMMARY ---\n"
+        ),
+        summary.path,
+        summary.read_bytes,
+        summary.read_blocks,
+        summary.measurements.total,
+        summary.stream_options.chunk_size,
+        summary.stream_options.effective_chunk_size(),
+        summary.stream_options.read_ahead_capacity,
+        summary.media_stream_options.initial_buffer_size,
+        summary.media_stream_options.worker_options.low_watermark,
+        summary.media_stream_options.worker_options.high_watermark,
+        summary.media_stream_options.worker_options.pipeline_depth,
         mib_per_second(
             summary.initial_prefill_bytes,
             summary.initial_prefill_elapsed,
-        )
-    );
-    println!(
-        "read_phase_mib_s: {:.2}",
-        mib_per_second(summary.measurements.total, summary.read_elapsed)
-    );
-    println!(
-        "total_mib_s: {:.2}",
-        mib_per_second(summary.measurements.total, total_elapsed)
-    );
-    println!("slowest_block: {:?}", summary.measurements.slowest);
-    println!("refill_blocks: {}", summary.measurements.refill_times.len());
-    println!("cached_blocks: {}", summary.measurements.cached_times.len());
-    println!(
-        "block_latency_p95: {:?}",
-        percentile_duration_copy(&summary.measurements.block_times, 95)
-    );
-    println!(
-        "block_latency_p99: {:?}",
-        percentile_duration_copy(&summary.measurements.block_times, 99)
-    );
-    println!(
-        "internal_read_calls: {}",
-        summary.stream_io_stats.read_at_calls
-    );
-    println!(
-        "internal_read_avg_size: {}",
-        summary.stream_io_stats.average_read_size()
-    );
-    println!(
-        "internal_read_avg_latency: {:?}",
-        summary.stream_io_stats.average_read_latency()
-    );
-    println!(
-        "internal_summed_source_time: {:?}",
-        summary.stream_io_stats.read_at_elapsed
-    );
-    println!(
-        "internal_summed_source_rate_mib_s: {:.2}",
+        ),
+        mib_per_second(summary.measurements.total, summary.read_elapsed),
+        mib_per_second(summary.measurements.total, total_elapsed),
+        summary.measurements.slowest,
+        summary.measurements.refill_times.len(),
+        summary.measurements.cached_times.len(),
+        percentile_duration_copy(&summary.measurements.block_times, 95),
+        percentile_duration_copy(&summary.measurements.block_times, 99),
+        summary.stream_io_stats.read_at_calls,
+        summary.stream_io_stats.average_read_size(),
+        summary.stream_io_stats.average_read_latency(),
+        summary.stream_io_stats.read_at_elapsed,
         summary.stream_io_stats.read_throughput_mib_per_second()
-    );
-    println!("--- END SMOKE REPORT SUMMARY ---");
+    )
+}
+
+fn save_report_summary_if_requested(
+    report_path: Option<&str>,
+    report_summary: &str,
+) -> Result<(), Error> {
+    let Some(report_path) = report_path else {
+        return Ok(());
+    };
+
+    std::fs::write(report_path, report_summary).map_err(|error| {
+        Error::InvalidConfig(format!(
+            "failed to write SMB report summary to {report_path}: {error}"
+        ))
+    })?;
+
+    println!("saved smoke report summary to {report_path}");
+
+    Ok(())
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {

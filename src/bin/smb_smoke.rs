@@ -28,16 +28,17 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Error> {
-    let uri = env::var("SMB_URI").map_err(|_| {
-        Error::InvalidConfig(
-            "SMB_URI is required, for example smb://user:pass@host/share/path".into(),
-        )
-    })?;
+    let uri = env::var("SMB_URI").ok();
     let host = env::var("SMB_HOST").ok();
+    let share_from_env = env::var("SMB_SHARE")
+        .ok()
+        .or_else(|| env::var("SMB_VOLUME_NAME").ok())
+        .or_else(|| env::var("SMB_DISK_NAME").ok());
     let user = env::var("SMB_USER").ok();
     let password = env::var("SMB_PASSWORD").ok();
     let domain = env::var("SMB_DOMAIN").ok();
     let read_path = env::var("SMB_READ_PATH").ok();
+    let list_path_env = env::var("SMB_LIST_PATH").ok();
     let timeout = env_u64("SMB_TIMEOUT_MS", DEFAULT_TIMEOUT_MS);
     let read_bytes = env_usize("SMB_READ_BYTES", DEFAULT_READ_BYTES);
     let read_blocks = env_usize("SMB_READ_BLOCKS", DEFAULT_READ_BLOCKS);
@@ -57,48 +58,55 @@ async fn run() -> Result<(), Error> {
 
     let timeout = Duration::from_millis(timeout);
 
-    let config = resolve_smb_uri(&uri)?;
-    let connect_host = host.as_deref().unwrap_or(config.hostname);
-    let auth_user = user.as_deref().or(config.user);
-    let auth_password = password.as_deref().or(config.password).unwrap_or("");
-    let auth_domain = domain
-        .as_deref()
-        .or(config.domain)
-        .unwrap_or(config.hostname);
+    let parsed = uri.as_deref().map(resolve_smb_uri).transpose()?;
+
+    let parsed_hostname = parsed.as_ref().map(|config| config.hostname);
+    let parsed_port = parsed.as_ref().and_then(|config| config.port);
+    let parsed_domain = parsed.as_ref().and_then(|config| config.domain);
+    let parsed_user = parsed.as_ref().and_then(|config| config.user);
+    let parsed_password = parsed.as_ref().and_then(|config| config.password);
+    let parsed_share = parsed.as_ref().and_then(|config| config.share);
+    let parsed_path = parsed.as_ref().and_then(|config| config.path);
+
+    let connect_host = host.as_deref().or(parsed_hostname).ok_or_else(|| {
+        Error::InvalidConfig("SMB_HOST is required when SMB_URI is not set".into())
+    })?;
+
+    let auth_user = user.as_deref().or(parsed_user);
+    let auth_password = password.as_deref().or(parsed_password).unwrap_or("");
+    let auth_domain = domain.as_deref().or(parsed_domain).unwrap_or(connect_host);
     let auth = auth_user.map(|user| Auth::new(user, "CIFSCLIENT", auth_domain, auth_password));
 
-    let mut cifs = Cifs::open_timeout(connect_host, config.port, auth, timeout).await?;
+    let mut cifs = Cifs::open_timeout(connect_host, parsed_port, auth, timeout).await?;
 
-    let share_name = config
-        .share
-        .map(ToOwned::to_owned)
-        .or_else(|| env::var("SMB_SHARE").ok())
-        .or_else(|| env::var("SMB_VOLUME_NAME").ok())
-        .or_else(|| env::var("SMB_DISK_NAME").ok());
+    let share_name = parsed_share.map(ToOwned::to_owned).or(share_from_env);
 
     let Some(share_name) = share_name else {
         println!("connected to \\\\{connect_host}");
-        if connect_host != config.hostname {
-            println!(
-                "resolved uri host {} via SMB_HOST {connect_host}",
-                config.hostname
-            );
+        if let Some(parsed_hostname) = parsed_hostname {
+            if connect_host != parsed_hostname {
+                println!("resolved uri host {parsed_hostname} via SMB_HOST {connect_host}");
+            }
         }
-        println!("server root URI detected: smb://{}/", config.hostname);
         println!("SMB share name is required for this server");
         println!("set SMB_SHARE, for example: SMB_SHARE='HARD'");
         return Ok(());
     };
 
-    if config.share.is_none() {
-        println!("server root URI detected: smb://{}/", config.hostname);
+    if uri.is_some() && parsed_share.is_none() {
+        println!("server root URI detected");
+    }
+
+    if parsed_share.is_none() {
         println!("using SMB share from environment: {share_name}");
     }
 
     let mount_path = format!("\\\\{}\\{}", connect_host, share_name);
     let share = cifs.mount(&mount_path).await?;
 
-    let pattern = match config.path {
+    let list_path = list_path_env.as_deref().or(parsed_path);
+
+    let pattern = match list_path {
         Some(path) if !path.is_empty() => format!("{path}/*"),
         _ => "*".to_owned(),
     };
@@ -113,11 +121,10 @@ async fn run() -> Result<(), Error> {
     let presentations = media_presentations(&entries);
 
     println!("connected to {mount_path}");
-    if connect_host != config.hostname {
-        println!(
-            "resolved uri host {} via SMB_HOST {connect_host}",
-            config.hostname
-        );
+    if let Some(parsed_hostname) = parsed_hostname {
+        if connect_host != parsed_hostname {
+            println!("resolved uri host {parsed_hostname} via SMB_HOST {connect_host}");
+        }
     }
     println!("listed pattern: {pattern}");
     println!("media entries in first batch: {}", entries.len());

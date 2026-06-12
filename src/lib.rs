@@ -381,6 +381,16 @@ impl StreamingWorkerStats {
     pub fn prefetched(&self) -> u64 {
         self.source_position.saturating_sub(self.playback_position)
     }
+
+    pub fn should_prefill(&self) -> bool {
+        !self.source_eof
+            && self.buffered <= self.low_watermark
+            && self.buffered < self.high_watermark
+    }
+
+    pub fn high_watermark_deficit(&self) -> usize {
+        self.high_watermark.saturating_sub(self.buffered)
+    }
 }
 
 #[derive(Debug)]
@@ -451,6 +461,10 @@ impl StreamingWorkerState {
             high_watermark: self.options.high_watermark,
             source_eof: self.source_eof,
         }
+    }
+
+    pub fn should_prefill(&self) -> bool {
+        self.stats().should_prefill()
     }
 
     pub fn next_buffered_read_request(
@@ -567,6 +581,10 @@ impl StreamingWorker {
         self.state.is_finished()
     }
 
+    pub fn should_prefill(&self) -> bool {
+        self.state.should_prefill()
+    }
+
     pub fn read_available(&mut self, max_len: usize) -> Option<Bytes> {
         self.state.pop_read(max_len)
     }
@@ -611,6 +629,19 @@ impl StreamingWorker {
         timeout: Duration,
     ) -> Result<bool, Error> {
         with_timeout(timeout, self.fill_until_buffered(cifs, buffered_goal)).await
+    }
+
+    pub async fn prefill_to_high_watermark(&mut self, cifs: &mut Cifs) -> Result<bool, Error> {
+        self.fill_until_buffered(cifs, self.state.options.high_watermark)
+            .await
+    }
+
+    pub async fn prefill_to_high_watermark_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        timeout: Duration,
+    ) -> Result<bool, Error> {
+        with_timeout(timeout, self.prefill_to_high_watermark(cifs)).await
     }
 
     pub async fn read_block(
@@ -1830,7 +1861,8 @@ mod tests {
         media_presentations_with_summaries, read_count_for, resolve_smb_uri, retain_media_entries,
         seek_position, sort_dir_entries, MediaEntry, MediaFolderSummary, MediaKind,
         MediaPresentation, ReadAhead, StreamOptions, StreamingBuffer, StreamingWorker,
-        StreamingWorkerOptions, StreamingWorkerReadRequest, StreamingWorkerState, SMB_READ_MAX,
+        StreamingWorkerOptions, StreamingWorkerReadRequest, StreamingWorkerState,
+        StreamingWorkerStats, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -2696,5 +2728,54 @@ mod tests {
             state.next_buffered_read_request(10),
             Some(StreamingWorkerReadRequest { offset: 0, len: 3 })
         );
+    }
+
+    #[test]
+    fn streaming_worker_stats_reports_prefill_need() {
+        let stats = StreamingWorkerStats {
+            playback_position: 0,
+            source_position: 0,
+            file_size: 100,
+            buffered: 4,
+            buffered_chunks: 1,
+            low_watermark: 4,
+            high_watermark: 12,
+            source_eof: false,
+        };
+
+        assert!(stats.should_prefill());
+        assert_eq!(stats.high_watermark_deficit(), 8);
+
+        let enough_buffered = StreamingWorkerStats {
+            buffered: 8,
+            ..stats
+        };
+
+        assert!(!enough_buffered.should_prefill());
+        assert_eq!(enough_buffered.high_watermark_deficit(), 4);
+
+        let eof = StreamingWorkerStats {
+            source_eof: true,
+            ..stats
+        };
+
+        assert!(!eof.should_prefill());
+    }
+
+    #[test]
+    fn streaming_worker_state_reports_prefill_need_when_buffer_reaches_low_watermark() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 4, 12).unwrap();
+        let mut state = StreamingWorkerState::new(100, options).unwrap();
+
+        assert!(state.should_prefill());
+
+        state
+            .push_source_chunk(Bytes::from_static(b"abcdefgh"))
+            .unwrap();
+        assert!(!state.should_prefill());
+
+        assert_eq!(state.pop_read(4).unwrap().as_ref(), b"abcd");
+        assert!(state.should_prefill());
     }
 }

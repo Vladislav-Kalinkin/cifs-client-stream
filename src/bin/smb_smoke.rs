@@ -57,6 +57,7 @@ async fn run() -> Result<(), Error> {
     let scan_folder_summaries = env_bool("SMB_SCAN_FOLDER_SUMMARIES", false);
     let worker_prefill_high = env_bool("SMB_WORKER_PREFILL_HIGH", false);
     let worker_initial_buffer = env_usize("SMB_WORKER_INITIAL_BUFFER_BYTES", 1024 * 1024);
+    let pipeline_depth = env_usize("SMB_PIPELINE_DEPTH", 1);
 
     let timeout = Duration::from_millis(timeout);
 
@@ -170,13 +171,14 @@ async fn run() -> Result<(), Error> {
 
     if let Some(path) = read_path {
         println!(
-            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} chunk_size={} mode=media-stream print_blocks={} prefill_high={}",
+            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} chunk_size={} mode=media-stream print_blocks={} prefill_high={} pipeline_depth={}",
             read_bytes,
             read_blocks,
             stream_options.read_ahead_capacity,
             stream_options.chunk_size,
             print_blocks,
-            worker_prefill_high
+            worker_prefill_high,
+            pipeline_depth
         );
 
         let default_low_watermark = worker_initial_buffer.max(read_bytes);
@@ -188,17 +190,22 @@ async fn run() -> Result<(), Error> {
 
         let high_watermark = env_usize_optional("SMB_WORKER_PREFILL_TARGET_BYTES")
             .unwrap_or_else(|| env_usize("SMB_HIGH_WATERMARK_BYTES", default_prefill_target));
-        let worker_options =
-            StreamingWorkerOptions::new(stream_options, low_watermark, high_watermark)?;
+        let worker_options = StreamingWorkerOptions::new_with_pipeline_depth(
+            stream_options,
+            low_watermark,
+            high_watermark,
+            pipeline_depth,
+        )?;
         let media_stream_options =
             SmbMediaStreamOptions::new(worker_options, worker_initial_buffer)?;
 
         println!(
-                "worker options: low_watermark={} high_watermark={} initial_buffer={} prefill_target={}",
+            "worker options: low_watermark={} high_watermark={} initial_buffer={} prefill_target={} pipeline_depth={}",
                 media_stream_options.worker_options.low_watermark,
                 media_stream_options.worker_options.high_watermark,
                 media_stream_options.initial_buffer_size,
-                media_stream_options.worker_options.high_watermark
+                media_stream_options.worker_options.high_watermark,
+                media_stream_options.worker_options.pipeline_depth
             );
 
         cifs.reset_io_stats();
@@ -555,7 +562,7 @@ fn print_io_stats(label: &str, stats: CifsIoStats) {
     }
 
     println!(
-        "{}: calls={} bytes={} avg_size={} avg_latency={:?} source_time={:?} source_rate={:.2} MiB/s",
+        "{}: calls={} bytes={} avg_size={} avg_latency={:?} summed_source_time={:?} summed_source_rate={:.2} MiB/s",
         label,
         stats.read_at_calls,
         stats.read_at_bytes,

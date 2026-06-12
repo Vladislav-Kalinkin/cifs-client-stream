@@ -241,6 +241,7 @@ pub struct StreamingWorkerOptions {
     pub stream_options: StreamOptions,
     pub low_watermark: usize,
     pub high_watermark: usize,
+    pub pipeline_depth: usize,
 }
 
 impl Default for StreamingWorkerOptions {
@@ -250,6 +251,7 @@ impl Default for StreamingWorkerOptions {
             stream_options,
             low_watermark: stream_options.read_ahead_capacity / 4,
             high_watermark: stream_options.read_ahead_capacity,
+            pipeline_depth: 1,
         }
     }
 }
@@ -260,10 +262,20 @@ impl StreamingWorkerOptions {
         low_watermark: usize,
         high_watermark: usize,
     ) -> Result<Self, Error> {
+        Self::new_with_pipeline_depth(stream_options, low_watermark, high_watermark, 1)
+    }
+
+    pub fn new_with_pipeline_depth(
+        stream_options: StreamOptions,
+        low_watermark: usize,
+        high_watermark: usize,
+        pipeline_depth: usize,
+    ) -> Result<Self, Error> {
         let options = Self {
             stream_options,
             low_watermark,
             high_watermark,
+            pipeline_depth,
         };
         options.validate()?;
         Ok(options)
@@ -287,6 +299,18 @@ impl StreamingWorkerOptions {
         if self.high_watermark > self.stream_options.read_ahead_capacity {
             return Err(Error::InvalidConfig(
                 "streaming worker high watermark must not exceed read-ahead capacity".to_owned(),
+            ));
+        }
+
+        if self.pipeline_depth == 0 {
+            return Err(Error::InvalidConfig(
+                "streaming worker pipeline depth must be greater than zero".to_owned(),
+            ));
+        }
+
+        if self.pipeline_depth > 16 {
+            return Err(Error::InvalidConfig(
+                "streaming worker pipeline depth must not exceed 16".to_owned(),
             ));
         }
 
@@ -518,40 +542,52 @@ impl StreamingWorkerState {
         self.stats().should_prefill()
     }
 
-    pub fn next_buffered_read_request(
+    pub fn next_buffered_read_requests(
         &self,
         buffered_goal: usize,
-    ) -> Option<StreamingWorkerReadRequest> {
-        if self.source_eof || self.source_position >= self.file_size {
-            return None;
+        max_requests: usize,
+    ) -> Vec<StreamingWorkerReadRequest> {
+        if max_requests == 0 || self.source_eof || self.source_position >= self.file_size {
+            return Vec::new();
         }
 
         let buffered_goal = buffered_goal.min(self.options.high_watermark);
-        if self.buffer.buffered_len() >= buffered_goal {
-            return None;
+        let mut simulated_buffered = self.buffer.buffered_len();
+        let mut simulated_source_position = self.source_position;
+        let mut requests = Vec::with_capacity(max_requests);
+
+        while requests.len() < max_requests
+            && simulated_buffered < buffered_goal
+            && simulated_source_position < self.file_size
+        {
+            let free = buffered_goal.saturating_sub(simulated_buffered);
+            if free == 0 {
+                break;
+            }
+
+            let count = free.min(usize::from(self.options.stream_options.chunk_size));
+            let remaining = self.file_size.saturating_sub(simulated_source_position);
+
+            let len = if remaining > usize::MAX as u64 {
+                count
+            } else {
+                count.min(remaining as usize)
+            };
+
+            if len == 0 {
+                break;
+            }
+
+            requests.push(StreamingWorkerReadRequest {
+                offset: simulated_source_position,
+                len,
+            });
+
+            simulated_source_position += len as u64;
+            simulated_buffered += len;
         }
 
-        let free = buffered_goal.saturating_sub(self.buffer.buffered_len());
-        if free == 0 {
-            return None;
-        }
-
-        let count = free.min(usize::from(self.options.stream_options.chunk_size));
-        let remaining = self.file_size.saturating_sub(self.source_position);
-        let len = if remaining > usize::MAX as u64 {
-            count
-        } else {
-            count.min(remaining as usize)
-        };
-
-        if len == 0 {
-            return None;
-        }
-
-        Some(StreamingWorkerReadRequest {
-            offset: self.source_position,
-            len,
-        })
+        requests
     }
 
     pub fn push_source_chunk(&mut self, chunk: Bytes) -> Result<(), Error> {
@@ -640,20 +676,33 @@ impl StreamingWorker {
     ) -> Result<bool, Error> {
         let mut filled = false;
 
-        while let Some(request) = self.state.next_buffered_read_request(buffered_goal) {
-            let count: u16 = request.len.try_into()?;
-            let chunk = cifs
-                .read_at(&self.stream.handle, request.offset, count)
+        while !self.state.is_source_eof() {
+            let requests = self
+                .state
+                .next_buffered_read_requests(buffered_goal, self.state.options.pipeline_depth);
+
+            if requests.is_empty() {
+                break;
+            }
+
+            let chunks = cifs
+                .read_at_pipelined(&self.stream.handle, &requests)
                 .await?;
 
-            self.state.push_source_chunk(chunk)?;
-            self.stream
-                .seek(SeekFrom::Start(self.state.source_position()))?;
-
-            filled = true;
-
-            if self.state.is_source_eof() {
+            if chunks.is_empty() {
                 break;
+            }
+
+            for chunk in chunks {
+                self.state.push_source_chunk(chunk)?;
+                self.stream
+                    .seek(SeekFrom::Start(self.state.source_position()))?;
+
+                filled = true;
+
+                if self.state.is_source_eof() {
+                    break;
+                }
             }
         }
 
@@ -1199,6 +1248,47 @@ impl Cifs {
         Ok(reply.data)
     }
 
+    async fn read_at_pipelined(
+        &mut self,
+        file: &Handle,
+        requests: &[StreamingWorkerReadRequest],
+    ) -> Result<Vec<Bytes>, Error> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if requests.len() == 1 {
+            let request = requests[0];
+            let count: u16 = request.len.try_into()?;
+            let chunk = self.read_at(file, request.offset, count).await?;
+            return Ok(vec![chunk]);
+        }
+
+        let mut in_flight = Vec::with_capacity(requests.len());
+
+        for request in requests {
+            let count: u16 = request.len.try_into()?;
+            let started = Instant::now();
+            let mid = self
+                .send(msg::Read::handle(file, request.offset, count))
+                .await?;
+
+            in_flight.push((mid, started));
+        }
+
+        let mut chunks = Vec::with_capacity(in_flight.len());
+
+        for (mid, started) in in_flight {
+            let reply: reply::Read = self.recv(mid).await?;
+            let elapsed = started.elapsed();
+
+            self.io_stats.record_read(reply.data.len(), elapsed);
+            chunks.push(reply.data);
+        }
+
+        Ok(chunks)
+    }
+
     /// find_first starts a search for files in the given share for the given pattern.
     ///
     /// It returns a FindFirst2 structure r, with:
@@ -1740,6 +1830,7 @@ mod tests {
             options.high_watermark,
             options.stream_options.read_ahead_capacity
         );
+        assert_eq!(options.pipeline_depth, 1);
         assert!(options.validate().is_ok());
     }
 
@@ -2250,8 +2341,8 @@ mod tests {
         assert_eq!(state.buffered_len(), 0);
         assert!(!state.is_source_eof());
         assert_eq!(
-            state.next_buffered_read_request(4),
-            Some(StreamingWorkerReadRequest { offset: 0, len: 4 })
+            state.next_buffered_read_requests(4, 1),
+            vec![StreamingWorkerReadRequest { offset: 0, len: 4 }]
         );
 
         let stats = state.stats();
@@ -2279,8 +2370,8 @@ mod tests {
         let mut state = StreamingWorkerState::new(3, options).unwrap();
 
         assert_eq!(
-            state.next_buffered_read_request(10),
-            Some(StreamingWorkerReadRequest { offset: 0, len: 3 })
+            state.next_buffered_read_requests(10, 1),
+            vec![StreamingWorkerReadRequest { offset: 0, len: 3 }]
         );
         state.push_source_chunk(Bytes::from_static(b"abc")).unwrap();
 
@@ -2308,8 +2399,8 @@ mod tests {
         assert_eq!(state.buffered_len(), 0);
         assert!(!state.is_source_eof());
         assert_eq!(
-            state.next_buffered_read_request(4),
-            Some(StreamingWorkerReadRequest { offset: 50, len: 4 })
+            state.next_buffered_read_requests(4, 1),
+            vec![StreamingWorkerReadRequest { offset: 50, len: 4 }]
         );
     }
     #[test]
@@ -2397,8 +2488,8 @@ mod tests {
         let mut state = StreamingWorkerState::new(100, options).unwrap();
 
         assert_eq!(
-            state.next_buffered_read_request(10),
-            Some(StreamingWorkerReadRequest { offset: 0, len: 4 })
+            state.next_buffered_read_requests(10, 1),
+            vec![StreamingWorkerReadRequest { offset: 0, len: 4 }]
         );
 
         state
@@ -2406,8 +2497,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            state.next_buffered_read_request(10),
-            Some(StreamingWorkerReadRequest { offset: 4, len: 4 })
+            state.next_buffered_read_requests(10, 1),
+            vec![StreamingWorkerReadRequest { offset: 4, len: 4 }]
         );
 
         state
@@ -2415,8 +2506,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            state.next_buffered_read_request(10),
-            Some(StreamingWorkerReadRequest { offset: 8, len: 2 })
+            state.next_buffered_read_requests(10, 1),
+            vec![StreamingWorkerReadRequest { offset: 8, len: 2 }]
         );
     }
 
@@ -2430,8 +2521,8 @@ mod tests {
             .push_source_chunk(Bytes::from_static(b"abcd"))
             .unwrap();
 
-        assert_eq!(state.next_buffered_read_request(4), None);
-        assert_eq!(state.next_buffered_read_request(3), None);
+        assert!(state.next_buffered_read_requests(4, 1).is_empty());
+        assert!(state.next_buffered_read_requests(3, 1).is_empty());
     }
 
     #[test]
@@ -2447,7 +2538,7 @@ mod tests {
             .push_source_chunk(Bytes::from_static(b"efgh"))
             .unwrap();
 
-        assert_eq!(state.next_buffered_read_request(16), None);
+        assert!(state.next_buffered_read_requests(16, 1).is_empty());
     }
 
     #[test]
@@ -2457,8 +2548,8 @@ mod tests {
         let state = StreamingWorkerState::new(3, options).unwrap();
 
         assert_eq!(
-            state.next_buffered_read_request(10),
-            Some(StreamingWorkerReadRequest { offset: 0, len: 3 })
+            state.next_buffered_read_requests(10, 1),
+            vec![StreamingWorkerReadRequest { offset: 0, len: 3 }]
         );
     }
 
@@ -2660,5 +2751,35 @@ mod tests {
         assert_eq!(summary.main_video, Some(0));
         assert!(summary.extras.is_empty());
         assert!(!summary.can_collapse_to_movie());
+    }
+
+    #[test]
+    fn streaming_worker_options_reject_invalid_pipeline_depth() {
+        let stream_options = StreamOptions::default();
+
+        assert!(StreamingWorkerOptions::new_with_pipeline_depth(stream_options, 1, 2, 0,).is_err());
+
+        assert!(
+            StreamingWorkerOptions::new_with_pipeline_depth(stream_options, 1, 2, 17,).is_err()
+        );
+    }
+
+    #[test]
+    fn streaming_worker_state_builds_pipelined_read_requests() {
+        let options = StreamingWorkerOptions::new_with_pipeline_depth(
+            StreamOptions::new(1024 * 1024, 65534).unwrap(),
+            256 * 1024,
+            512 * 1024,
+            4,
+        )
+        .unwrap();
+
+        let state = StreamingWorkerState::new(1024 * 1024, options).unwrap();
+        let requests = state.next_buffered_read_requests(256 * 1024, 4);
+
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].offset, 0);
+        assert_eq!(requests[0].len, 65534);
+        assert_eq!(requests[1].offset, 65534);
     }
 }

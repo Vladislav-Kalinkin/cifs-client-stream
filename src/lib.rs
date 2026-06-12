@@ -540,6 +540,42 @@ impl StreamingWorkerState {
         })
     }
 
+    pub fn next_buffered_read_request(
+        &self,
+        buffered_goal: usize,
+    ) -> Option<StreamingWorkerReadRequest> {
+        if self.source_eof || self.source_position >= self.file_size {
+            return None;
+        }
+
+        let buffered_goal = buffered_goal.min(self.options.high_watermark);
+        if self.buffer.buffered_len() >= buffered_goal {
+            return None;
+        }
+
+        let free = buffered_goal.saturating_sub(self.buffer.buffered_len());
+        if free == 0 {
+            return None;
+        }
+
+        let count = free.min(usize::from(self.options.stream_options.chunk_size));
+        let remaining = self.file_size.saturating_sub(self.source_position);
+        let len = if remaining > usize::MAX as u64 {
+            count
+        } else {
+            count.min(remaining as usize)
+        };
+
+        if len == 0 {
+            return None;
+        }
+
+        Some(StreamingWorkerReadRequest {
+            offset: self.source_position,
+            len,
+        })
+    }
+
     pub fn push_source_chunk(&mut self, chunk: Bytes) -> Result<(), Error> {
         if chunk.is_empty() {
             self.source_eof = true;
@@ -682,6 +718,42 @@ impl StreamingWorker {
         timeout: Duration,
     ) -> Result<bool, Error> {
         with_timeout(timeout, self.fill_to_high_watermark(cifs)).await
+    }
+
+    pub async fn fill_until_buffered(
+        &mut self,
+        cifs: &mut Cifs,
+        buffered_goal: usize,
+    ) -> Result<bool, Error> {
+        let mut filled = false;
+
+        while let Some(request) = self.state.next_buffered_read_request(buffered_goal) {
+            let count: u16 = request.len.try_into()?;
+            let chunk = cifs
+                .read_at(&self.stream.handle, request.offset, count)
+                .await?;
+
+            self.state.push_source_chunk(chunk)?;
+            self.stream
+                .seek(SeekFrom::Start(self.state.source_position()))?;
+
+            filled = true;
+
+            if self.state.is_source_eof() {
+                break;
+            }
+        }
+
+        Ok(filled)
+    }
+
+    pub async fn fill_until_buffered_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        buffered_goal: usize,
+        timeout: Duration,
+    ) -> Result<bool, Error> {
+        with_timeout(timeout, self.fill_until_buffered(cifs, buffered_goal)).await
     }
 
     pub async fn read_block(
@@ -2916,6 +2988,78 @@ mod tests {
 
         assert_eq!(
             state.next_high_watermark_read_request(),
+            Some(StreamingWorkerReadRequest { offset: 0, len: 3 })
+        );
+    }
+
+    #[test]
+    fn streaming_worker_state_buffered_goal_request_reads_until_goal() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
+        let mut state = StreamingWorkerState::new(100, options).unwrap();
+
+        assert_eq!(
+            state.next_buffered_read_request(10),
+            Some(StreamingWorkerReadRequest { offset: 0, len: 4 })
+        );
+
+        state
+            .push_source_chunk(Bytes::from_static(b"abcd"))
+            .unwrap();
+
+        assert_eq!(
+            state.next_buffered_read_request(10),
+            Some(StreamingWorkerReadRequest { offset: 4, len: 4 })
+        );
+
+        state
+            .push_source_chunk(Bytes::from_static(b"efgh"))
+            .unwrap();
+
+        assert_eq!(
+            state.next_buffered_read_request(10),
+            Some(StreamingWorkerReadRequest { offset: 8, len: 2 })
+        );
+    }
+
+    #[test]
+    fn streaming_worker_state_buffered_goal_request_stops_when_goal_reached() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
+        let mut state = StreamingWorkerState::new(100, options).unwrap();
+
+        state
+            .push_source_chunk(Bytes::from_static(b"abcd"))
+            .unwrap();
+
+        assert_eq!(state.next_buffered_read_request(4), None);
+        assert_eq!(state.next_buffered_read_request(3), None);
+    }
+
+    #[test]
+    fn streaming_worker_state_buffered_goal_request_is_capped_by_high_watermark() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 8, 8).unwrap();
+        let mut state = StreamingWorkerState::new(100, options).unwrap();
+
+        state
+            .push_source_chunk(Bytes::from_static(b"abcd"))
+            .unwrap();
+        state
+            .push_source_chunk(Bytes::from_static(b"efgh"))
+            .unwrap();
+
+        assert_eq!(state.next_buffered_read_request(16), None);
+    }
+
+    #[test]
+    fn streaming_worker_state_buffered_goal_request_respects_file_end() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
+        let state = StreamingWorkerState::new(3, options).unwrap();
+
+        assert_eq!(
+            state.next_buffered_read_request(10),
             Some(StreamingWorkerReadRequest { offset: 0, len: 3 })
         );
     }

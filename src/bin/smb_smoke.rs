@@ -1,11 +1,13 @@
 use std::env;
 use std::time::Duration;
+use std::time::Instant;
 
 use cifs_client::{
     media_presentations, resolve_smb_uri, Auth, Cifs, Error, MediaPresentation, StreamOptions,
 };
 
 const DEFAULT_READ_BYTES: usize = 256 * 1024;
+const DEFAULT_READ_BLOCKS: usize = 1;
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const MAX_ENTRIES_TO_PRINT: usize = 25;
 
@@ -34,6 +36,7 @@ async fn run() -> Result<(), Error> {
     let read_path = env::var("SMB_READ_PATH").ok();
     let timeout = env_u64("SMB_TIMEOUT_MS", DEFAULT_TIMEOUT_MS);
     let read_bytes = env_usize("SMB_READ_BYTES", DEFAULT_READ_BYTES);
+    let read_blocks = env_usize("SMB_READ_BLOCKS", DEFAULT_READ_BLOCKS);
     let timeout = Duration::from_millis(timeout);
 
     let config = resolve_smb_uri(&uri)?;
@@ -91,16 +94,37 @@ async fn run() -> Result<(), Error> {
         let mut stream = cifs
             .open_read_ahead_with_options(&share, &path, StreamOptions::default())
             .await?;
-        let block = stream
-            .read_block_timeout(&mut cifs, read_bytes, timeout)
-            .await?
-            .unwrap_or_default();
+        let started = Instant::now();
+        let mut total = 0usize;
+
+        for block_index in 0..read_blocks {
+            let block = stream
+                .read_block_timeout(&mut cifs, read_bytes, timeout)
+                .await?
+                .unwrap_or_default();
+            if block.is_empty() {
+                println!("reached EOF after {} blocks", block_index);
+                break;
+            }
+            total += block.len();
+            println!(
+                "block {} read {} bytes at source_position={} buffered={}",
+                block_index + 1,
+                block.len(),
+                stream.stats().source_position,
+                stream.stats().buffered
+            );
+        }
+
+        let elapsed = started.elapsed();
+        let mbps = if elapsed.is_zero() {
+            0.0
+        } else {
+            (total as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
+        };
         println!(
-            "read {} bytes from {} at source_position={} buffered={}",
-            block.len(),
-            path,
-            stream.stats().source_position,
-            stream.stats().buffered
+            "read {} bytes from {} in {:?} ({:.2} MiB/s)",
+            total, path, elapsed, mbps
         );
         cifs.close_read_ahead(stream).await?;
     }

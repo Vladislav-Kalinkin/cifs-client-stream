@@ -26,6 +26,7 @@ cargo run --bin smb_smoke
 ```sh
 SMB_TIMEOUT_MS=5000
 SMB_READ_BYTES=262144
+SMB_READ_BLOCKS=4
 ```
 
 ## Contributing

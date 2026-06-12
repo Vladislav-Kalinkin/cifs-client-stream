@@ -355,6 +355,18 @@ impl StreamingBuffer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamingWorkerReadRequest {
+    pub offset: u64,
+    pub len: usize,
+}
+
+impl StreamingWorkerReadRequest {
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamingWorkerStats {
     pub playback_position: u64,
     pub source_position: u64,
@@ -477,6 +489,18 @@ impl StreamingWorkerState {
         } else {
             count.min(remaining as usize)
         }
+    }
+
+    pub fn next_source_read_request(&self) -> Option<StreamingWorkerReadRequest> {
+        let len = self.next_source_read_len();
+        if len == 0 {
+            return None;
+        }
+
+        Some(StreamingWorkerReadRequest {
+            offset: self.source_position,
+            len,
+        })
     }
 
     pub fn push_source_chunk(&mut self, chunk: Bytes) -> Result<(), Error> {
@@ -1778,7 +1802,7 @@ mod tests {
         media_presentations_with_summaries, read_count_for, resolve_smb_uri, retain_media_entries,
         seek_position, sort_dir_entries, MediaEntry, MediaFolderSummary, MediaKind,
         MediaPresentation, ReadAhead, StreamOptions, StreamingBuffer, StreamingWorkerOptions,
-        StreamingWorkerState, SMB_READ_MAX,
+        StreamingWorkerReadRequest, StreamingWorkerState, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -2457,6 +2481,18 @@ mod tests {
     }
 
     #[test]
+    fn streaming_worker_state_reports_initial_source_read_request() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 4, 12, 8).unwrap();
+        let state = StreamingWorkerState::new(100, options).unwrap();
+
+        assert_eq!(
+            state.next_source_read_request(),
+            Some(StreamingWorkerReadRequest { offset: 0, len: 4 })
+        );
+    }
+
+    #[test]
     fn streaming_worker_state_refills_only_below_low_watermark() {
         let options =
             StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
@@ -2475,6 +2511,29 @@ mod tests {
         assert_eq!(state.playback_position(), 2);
         assert_eq!(state.buffered_len(), 2);
         assert_eq!(state.next_source_read_len(), 4);
+    }
+
+    #[test]
+    fn streaming_worker_state_read_request_tracks_source_position() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
+        let mut state = StreamingWorkerState::new(100, options).unwrap();
+
+        assert_eq!(
+            state.next_source_read_request(),
+            Some(StreamingWorkerReadRequest { offset: 0, len: 4 })
+        );
+
+        state
+            .push_source_chunk(Bytes::from_static(b"abcd"))
+            .unwrap();
+        assert_eq!(state.next_source_read_request(), None);
+
+        assert_eq!(state.pop_read(2).unwrap().as_ref(), b"ab");
+        assert_eq!(
+            state.next_source_read_request(),
+            Some(StreamingWorkerReadRequest { offset: 4, len: 4 })
+        );
     }
 
     #[test]
@@ -2526,6 +2585,23 @@ mod tests {
     }
 
     #[test]
+    fn streaming_worker_state_read_request_follows_seek() {
+        let options =
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 2, 12, 8).unwrap();
+        let mut state = StreamingWorkerState::new(100, options).unwrap();
+
+        state
+            .push_source_chunk(Bytes::from_static(b"abcd"))
+            .unwrap();
+        assert_eq!(state.seek(SeekFrom::Start(50)).unwrap(), 50);
+
+        assert_eq!(
+            state.next_source_read_request(),
+            Some(StreamingWorkerReadRequest { offset: 50, len: 4 })
+        );
+    }
+
+    #[test]
     fn streaming_worker_state_seek_to_end_marks_source_eof() {
         let mut state = StreamingWorkerState::with_defaults(100);
 
@@ -2534,5 +2610,13 @@ mod tests {
         assert_eq!(state.source_position(), 100);
         assert!(state.is_source_eof());
         assert!(state.is_finished());
+    }
+
+    #[test]
+    fn streaming_worker_state_read_request_is_none_at_eof() {
+        let mut state = StreamingWorkerState::with_defaults(100);
+
+        assert_eq!(state.seek(SeekFrom::End(0)).unwrap(), 100);
+        assert_eq!(state.next_source_read_request(), None);
     }
 }

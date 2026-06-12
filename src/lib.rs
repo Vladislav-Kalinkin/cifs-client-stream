@@ -81,6 +81,12 @@ pub struct StreamingWorker {
     state: StreamingWorkerState,
 }
 
+#[derive(Debug)]
+pub struct SmbMediaStream {
+    worker: StreamingWorker,
+    options: SmbMediaStreamOptions,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaKind {
     Folder,
@@ -263,6 +269,56 @@ impl StreamingWorkerOptions {
         if self.high_watermark > self.stream_options.read_ahead_capacity {
             return Err(Error::InvalidConfig(
                 "streaming worker high watermark must not exceed read-ahead capacity".to_owned(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SmbMediaStreamOptions {
+    pub worker_options: StreamingWorkerOptions,
+    pub initial_buffer_size: usize,
+}
+
+impl Default for SmbMediaStreamOptions {
+    fn default() -> Self {
+        let stream_options = StreamOptions::default();
+        let initial_buffer_size = 1024 * 1024;
+        let worker_options = StreamingWorkerOptions::new(
+            stream_options,
+            initial_buffer_size,
+            stream_options.read_ahead_capacity,
+        )
+        .expect("default SMB media stream options must be valid");
+
+        Self {
+            worker_options,
+            initial_buffer_size,
+        }
+    }
+}
+
+impl SmbMediaStreamOptions {
+    pub fn new(
+        worker_options: StreamingWorkerOptions,
+        initial_buffer_size: usize,
+    ) -> Result<Self, Error> {
+        let options = Self {
+            worker_options,
+            initial_buffer_size,
+        };
+        options.validate()?;
+        Ok(options)
+    }
+
+    pub fn validate(&self) -> Result<(), Error> {
+        self.worker_options.validate()?;
+
+        if self.initial_buffer_size > self.worker_options.high_watermark {
+            return Err(Error::InvalidConfig(
+                "SMB media stream initial buffer must not exceed high watermark".to_owned(),
             ));
         }
 
@@ -659,6 +715,100 @@ impl StreamingWorker {
         }
 
         Ok(self.read_available(max_len))
+    }
+
+    pub async fn read_block_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        max_len: usize,
+        timeout: Duration,
+    ) -> Result<Option<Bytes>, Error> {
+        with_timeout(timeout, self.read_block(cifs, max_len)).await
+    }
+}
+
+impl SmbMediaStream {
+    pub fn new(stream: FileStream, options: SmbMediaStreamOptions) -> Result<Self, Error> {
+        options.validate()?;
+
+        let worker = StreamingWorker::new(stream, options.worker_options)?;
+
+        Ok(Self { worker, options })
+    }
+
+    pub fn with_defaults(stream: FileStream) -> Self {
+        Self::new(stream, SmbMediaStreamOptions::default())
+            .expect("default SMB media stream options must be valid")
+    }
+
+    pub fn options(&self) -> SmbMediaStreamOptions {
+        self.options
+    }
+
+    pub fn worker(&self) -> &StreamingWorker {
+        &self.worker
+    }
+
+    pub fn into_worker(self) -> StreamingWorker {
+        self.worker
+    }
+
+    pub fn stats(&self) -> StreamingWorkerStats {
+        self.worker.stats()
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.worker.is_finished()
+    }
+
+    pub fn should_prefill(&self) -> bool {
+        self.worker.should_prefill()
+    }
+
+    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+        self.worker.seek(pos)
+    }
+
+    pub async fn fill_initial_buffer(&mut self, cifs: &mut Cifs) -> Result<bool, Error> {
+        if self.options.initial_buffer_size == 0 {
+            return Ok(false);
+        }
+
+        self.worker
+            .fill_until_buffered(cifs, self.options.initial_buffer_size)
+            .await
+    }
+
+    pub async fn fill_initial_buffer_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        timeout: Duration,
+    ) -> Result<bool, Error> {
+        with_timeout(timeout, self.fill_initial_buffer(cifs)).await
+    }
+
+    pub async fn maybe_prefill(&mut self, cifs: &mut Cifs) -> Result<bool, Error> {
+        if !self.should_prefill() {
+            return Ok(false);
+        }
+
+        self.worker.prefill_to_high_watermark(cifs).await
+    }
+
+    pub async fn maybe_prefill_timeout(
+        &mut self,
+        cifs: &mut Cifs,
+        timeout: Duration,
+    ) -> Result<bool, Error> {
+        with_timeout(timeout, self.maybe_prefill(cifs)).await
+    }
+
+    pub async fn read_block(
+        &mut self,
+        cifs: &mut Cifs,
+        max_len: usize,
+    ) -> Result<Option<Bytes>, Error> {
+        self.worker.read_block(cifs, max_len).await
     }
 
     pub async fn read_block_timeout(
@@ -1339,6 +1489,28 @@ impl Cifs {
         StreamingWorker::new(self.open_stream(share, path).await?, options)
     }
 
+    pub async fn open_media_stream(
+        &mut self,
+        share: &Share,
+        path: &str,
+    ) -> Result<SmbMediaStream, Error> {
+        self.open_media_stream_with_options(share, path, SmbMediaStreamOptions::default())
+            .await
+    }
+
+    pub async fn open_media_stream_with_options(
+        &mut self,
+        share: &Share,
+        path: &str,
+        options: SmbMediaStreamOptions,
+    ) -> Result<SmbMediaStream, Error> {
+        SmbMediaStream::new(self.open_stream(share, path).await?, options)
+    }
+
+    pub async fn close_media_stream(&mut self, stream: SmbMediaStream) -> Result<(), Error> {
+        self.close_streaming_worker(stream.into_worker()).await
+    }
+
     pub async fn close_streaming_worker(&mut self, worker: StreamingWorker) -> Result<(), Error> {
         self.close_stream(worker.into_stream()).await
     }
@@ -1860,9 +2032,9 @@ mod tests {
         is_likely_extra_video, is_media_entry, main_video_index, media_presentations,
         media_presentations_with_summaries, read_count_for, resolve_smb_uri, retain_media_entries,
         seek_position, sort_dir_entries, MediaEntry, MediaFolderSummary, MediaKind,
-        MediaPresentation, ReadAhead, StreamOptions, StreamingBuffer, StreamingWorker,
-        StreamingWorkerOptions, StreamingWorkerReadRequest, StreamingWorkerState,
-        StreamingWorkerStats, SMB_READ_MAX,
+        MediaPresentation, ReadAhead, SmbMediaStream, SmbMediaStreamOptions, StreamOptions,
+        StreamingBuffer, StreamingWorker, StreamingWorkerOptions, StreamingWorkerReadRequest,
+        StreamingWorkerState, StreamingWorkerStats, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -2777,5 +2949,63 @@ mod tests {
 
         assert_eq!(state.pop_read(4).unwrap().as_ref(), b"abcd");
         assert!(state.should_prefill());
+    }
+
+    #[test]
+    fn smb_media_stream_options_use_playback_friendly_defaults() {
+        let options = SmbMediaStreamOptions::default();
+
+        assert_eq!(options.initial_buffer_size, 1024 * 1024);
+        assert_eq!(options.worker_options.low_watermark, 1024 * 1024);
+        assert_eq!(
+            options.worker_options.high_watermark,
+            options.worker_options.stream_options.read_ahead_capacity
+        );
+        assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn smb_media_stream_wraps_streaming_worker_state() {
+        let options = SmbMediaStreamOptions::new(
+            StreamingWorkerOptions::new(StreamOptions::new(16, 4).unwrap(), 4, 12).unwrap(),
+            4,
+        )
+        .unwrap();
+
+        let mut stream = SmbMediaStream::new(fake_stream(100), options).unwrap();
+
+        assert_eq!(stream.stats().playback_position, 0);
+        assert_eq!(stream.stats().source_position, 0);
+        assert!(stream.should_prefill());
+
+        stream
+            .worker
+            .state
+            .push_source_chunk(Bytes::from_static(b"abcdefgh"))
+            .unwrap();
+
+        assert_eq!(stream.stats().buffered, 8);
+        assert!(!stream.should_prefill());
+
+        assert_eq!(stream.worker.read_available(4).unwrap().as_ref(), b"abcd");
+        assert!(stream.should_prefill());
+    }
+
+    #[test]
+    fn smb_media_stream_seek_resets_buffer_and_positions() {
+        let mut stream = SmbMediaStream::with_defaults(fake_stream(100));
+
+        stream
+            .worker
+            .state
+            .push_source_chunk(Bytes::from_static(b"abcdef"))
+            .unwrap();
+
+        assert_eq!(stream.worker.read_available(2).unwrap().as_ref(), b"ab");
+        assert_eq!(stream.seek(SeekFrom::Start(50)).unwrap(), 50);
+
+        assert_eq!(stream.stats().playback_position, 50);
+        assert_eq!(stream.stats().source_position, 50);
+        assert_eq!(stream.stats().buffered, 0);
     }
 }

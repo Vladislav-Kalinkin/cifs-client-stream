@@ -59,16 +59,6 @@ pub struct FileStream {
 }
 
 #[derive(Debug)]
-pub struct ReadAhead {
-    stream: FileStream,
-    position: u64,
-    chunks: VecDeque<Bytes>,
-    buffered: usize,
-    options: StreamOptions,
-    eof: bool,
-}
-
-#[derive(Debug)]
 pub struct DirectoryReader {
     tid: u16,
     sid: u16,
@@ -159,36 +149,6 @@ enum NaturalToken {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReadAheadStats {
-    pub position: u64,
-    pub source_position: u64,
-    pub file_size: u64,
-    pub buffered: usize,
-    pub buffered_chunks: usize,
-    pub read_ahead_capacity: usize,
-    pub chunk_size: u16,
-    pub eof: bool,
-}
-
-impl ReadAheadStats {
-    pub fn remaining(&self) -> u64 {
-        self.file_size.saturating_sub(self.position)
-    }
-
-    pub fn buffer_free(&self) -> usize {
-        self.read_ahead_capacity.saturating_sub(self.buffered)
-    }
-
-    pub fn prefetched(&self) -> u64 {
-        self.source_position.saturating_sub(self.position)
-    }
-
-    pub fn is_buffering(&self) -> bool {
-        !self.eof && self.buffered < self.read_ahead_capacity
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamOptions {
     pub read_ahead_capacity: usize,
     pub chunk_size: u16,
@@ -225,13 +185,6 @@ impl StreamOptions {
             ));
         }
         Ok(())
-    }
-
-    fn normalized(self) -> Self {
-        Self {
-            read_ahead_capacity: self.read_ahead_capacity,
-            chunk_size: self.chunk_size.min(SMB_READ_MAX),
-        }
     }
 }
 
@@ -858,303 +811,9 @@ impl FileStream {
         self.handle.size
     }
 
-    pub fn is_eof(&self) -> bool {
-        self.position >= self.size()
-    }
-
     pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
         self.position = seek_position(self.size(), self.position, pos)?;
         Ok(self.position)
-    }
-
-    pub async fn read_next(
-        &mut self,
-        cifs: &mut Cifs,
-        max_count: u16,
-    ) -> Result<Option<Bytes>, Error> {
-        if self.is_eof() || max_count == 0 {
-            return Ok(None);
-        }
-
-        let remaining = self.size() - self.position;
-        let count = read_count_for(remaining.min(u64::from(max_count)));
-        let chunk = cifs.read_at(&self.handle, self.position, count).await?;
-        if chunk.is_empty() {
-            return Ok(None);
-        }
-        if chunk.len() > usize::from(count) || chunk.len() as u64 > remaining {
-            return Err(Error::InternalError(
-                "server returned more data than requested".to_owned(),
-            ));
-        }
-
-        self.position += chunk.len() as u64;
-        Ok(Some(chunk))
-    }
-
-    pub async fn read_next_timeout(
-        &mut self,
-        cifs: &mut Cifs,
-        max_count: u16,
-        timeout: Duration,
-    ) -> Result<Option<Bytes>, Error> {
-        with_timeout(timeout, self.read_next(cifs, max_count)).await
-    }
-}
-
-impl ReadAhead {
-    pub fn new(stream: FileStream, capacity: usize, chunk_size: u16) -> Self {
-        let position = stream.position();
-        let options = StreamOptions {
-            read_ahead_capacity: capacity,
-            chunk_size,
-        }
-        .normalized();
-
-        Self {
-            stream,
-            position,
-            chunks: VecDeque::new(),
-            buffered: 0,
-            options,
-            eof: false,
-        }
-    }
-
-    pub fn with_options(stream: FileStream, options: StreamOptions) -> Result<Self, Error> {
-        options.validate()?;
-        let position = stream.position();
-        let options = options.normalized();
-
-        Ok(Self {
-            stream,
-            position,
-            chunks: VecDeque::new(),
-            buffered: 0,
-            options,
-            eof: false,
-        })
-    }
-
-    pub fn stream(&self) -> &FileStream {
-        &self.stream
-    }
-
-    pub fn into_stream(self) -> FileStream {
-        self.stream
-    }
-
-    pub fn position(&self) -> u64 {
-        self.position
-    }
-
-    pub fn source_position(&self) -> u64 {
-        self.stream.position()
-    }
-
-    pub fn options(&self) -> StreamOptions {
-        self.options
-    }
-
-    pub fn buffered_len(&self) -> usize {
-        self.buffered
-    }
-
-    pub fn buffered_chunks(&self) -> usize {
-        self.chunks.len()
-    }
-
-    pub fn buffer_free(&self) -> usize {
-        self.options
-            .read_ahead_capacity
-            .saturating_sub(self.buffered)
-    }
-
-    pub fn stats(&self) -> ReadAheadStats {
-        ReadAheadStats {
-            position: self.position,
-            source_position: self.source_position(),
-            file_size: self.stream.size(),
-            buffered: self.buffered,
-            buffered_chunks: self.buffered_chunks(),
-            read_ahead_capacity: self.options.read_ahead_capacity,
-            chunk_size: self.options.chunk_size,
-            eof: self.is_eof(),
-        }
-    }
-
-    pub fn is_eof(&self) -> bool {
-        self.eof && self.chunks.is_empty()
-    }
-
-    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
-        self.chunks.clear();
-        self.buffered = 0;
-        self.eof = false;
-        self.position = self.stream.seek(pos)?;
-        Ok(self.position)
-    }
-
-    pub fn discard_buffer(&mut self) {
-        self.chunks.clear();
-        self.buffered = 0;
-        self.position = self.stream.position();
-    }
-
-    pub async fn fill(&mut self, cifs: &mut Cifs) -> Result<(), Error> {
-        self.fill_to(cifs, self.options.read_ahead_capacity).await?;
-        Ok(())
-    }
-
-    pub async fn fill_timeout(&mut self, cifs: &mut Cifs, timeout: Duration) -> Result<(), Error> {
-        with_timeout(timeout, self.fill(cifs)).await
-    }
-
-    pub async fn next(&mut self, cifs: &mut Cifs) -> Result<Option<Bytes>, Error> {
-        self.fill_next_chunk(cifs).await?;
-        Ok(self.pop_chunk())
-    }
-
-    pub async fn next_timeout(
-        &mut self,
-        cifs: &mut Cifs,
-        timeout: Duration,
-    ) -> Result<Option<Bytes>, Error> {
-        with_timeout(timeout, self.next(cifs)).await
-    }
-
-    pub async fn read(&mut self, cifs: &mut Cifs, max_len: usize) -> Result<Option<Bytes>, Error> {
-        if max_len == 0 {
-            return Ok(None);
-        }
-
-        self.fill_to(cifs, max_len).await?;
-        Ok(self.pop_bytes(max_len))
-    }
-
-    pub async fn read_timeout(
-        &mut self,
-        cifs: &mut Cifs,
-        max_len: usize,
-        timeout: Duration,
-    ) -> Result<Option<Bytes>, Error> {
-        with_timeout(timeout, self.read(cifs, max_len)).await
-    }
-
-    pub async fn read_block(
-        &mut self,
-        cifs: &mut Cifs,
-        max_len: usize,
-    ) -> Result<Option<Bytes>, Error> {
-        if max_len == 0 {
-            return Ok(None);
-        }
-
-        if self.buffered < max_len && !self.eof {
-            self.fill_to(cifs, self.options.read_ahead_capacity).await?;
-        }
-
-        Ok(self.pop_block(max_len))
-    }
-
-    pub async fn read_block_timeout(
-        &mut self,
-        cifs: &mut Cifs,
-        max_len: usize,
-        timeout: Duration,
-    ) -> Result<Option<Bytes>, Error> {
-        with_timeout(timeout, self.read_block(cifs, max_len)).await
-    }
-
-    async fn fill_next_chunk(&mut self, cifs: &mut Cifs) -> Result<(), Error> {
-        if self.chunks.is_empty() && !self.eof && self.can_buffer_more() {
-            let count = self.next_read_count();
-            match self.stream.read_next(cifs, count).await? {
-                Some(chunk) => self.push_chunk(chunk),
-                None => self.eof = true,
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn fill_to(&mut self, cifs: &mut Cifs, buffered_goal: usize) -> Result<(), Error> {
-        let buffered_goal = buffered_goal.min(self.options.read_ahead_capacity);
-        while self.buffered < buffered_goal && self.can_buffer_more() && !self.eof {
-            let count = self.next_read_count_for(buffered_goal);
-            match self.stream.read_next(cifs, count).await? {
-                Some(chunk) => self.push_chunk(chunk),
-                None => self.eof = true,
-            }
-        }
-
-        Ok(())
-    }
-
-    fn can_buffer_more(&self) -> bool {
-        self.options.read_ahead_capacity > self.buffered && self.options.chunk_size > 0
-    }
-
-    fn next_read_count(&self) -> u16 {
-        self.next_read_count_for(self.options.read_ahead_capacity)
-    }
-
-    fn next_read_count_for(&self, buffered_goal: usize) -> u16 {
-        let free = buffered_goal
-            .min(self.options.read_ahead_capacity)
-            .saturating_sub(self.buffered);
-        read_count_for(free.min(usize::from(self.options.chunk_size)) as u64)
-    }
-
-    fn push_chunk(&mut self, chunk: Bytes) {
-        self.buffered += chunk.len();
-        self.chunks.push_back(chunk);
-    }
-
-    fn pop_chunk(&mut self) -> Option<Bytes> {
-        let chunk = self.chunks.pop_front()?;
-        self.buffered -= chunk.len();
-        self.position += chunk.len() as u64;
-        Some(chunk)
-    }
-
-    fn pop_bytes(&mut self, max_len: usize) -> Option<Bytes> {
-        if max_len == 0 {
-            return None;
-        }
-
-        let mut chunk = self.chunks.pop_front()?;
-        if chunk.len() > max_len {
-            let out = chunk.split_to(max_len);
-            self.buffered -= out.len();
-            self.position += out.len() as u64;
-            self.chunks.push_front(chunk);
-            return Some(out);
-        }
-
-        self.buffered -= chunk.len();
-        self.position += chunk.len() as u64;
-        Some(chunk)
-    }
-
-    fn pop_block(&mut self, max_len: usize) -> Option<Bytes> {
-        let first = self.pop_bytes(max_len)?;
-        if first.len() == max_len || self.chunks.is_empty() {
-            return Some(first);
-        }
-
-        let capacity = max_len.min(first.len().saturating_add(self.buffered));
-        let mut out = BytesMut::with_capacity(capacity);
-        out.extend_from_slice(&first);
-
-        while out.len() < max_len {
-            let Some(chunk) = self.pop_bytes(max_len - out.len()) else {
-                break;
-            };
-            out.extend_from_slice(&chunk);
-        }
-
-        Some(out.freeze())
     }
 }
 
@@ -1504,26 +1163,6 @@ impl Cifs {
         Ok(FileStream::new(self.openfile(share, path).await?))
     }
 
-    pub async fn open_read_ahead(
-        &mut self,
-        share: &Share,
-        path: &str,
-        capacity: usize,
-        chunk_size: u16,
-    ) -> Result<ReadAhead, Error> {
-        self.open_read_ahead_with_options(share, path, StreamOptions::new(capacity, chunk_size)?)
-            .await
-    }
-
-    pub async fn open_read_ahead_with_options(
-        &mut self,
-        share: &Share,
-        path: &str,
-        options: StreamOptions,
-    ) -> Result<ReadAhead, Error> {
-        ReadAhead::with_options(self.open_stream(share, path).await?, options)
-    }
-
     pub async fn open_media_stream(
         &mut self,
         share: &Share,
@@ -1562,10 +1201,6 @@ impl Cifs {
 
     pub async fn close_stream(&mut self, stream: FileStream) -> Result<(), Error> {
         self.close(stream.into_handle()).await
-    }
-
-    pub async fn close_read_ahead(&mut self, read_ahead: ReadAhead) -> Result<(), Error> {
-        self.close_stream(read_ahead.into_stream()).await
     }
 
     pub async fn read(&mut self, file: &Handle, offset: u64) -> Result<Bytes, Error> {
@@ -1859,10 +1494,6 @@ impl Cifs {
     }
 }
 
-fn read_count_for(remaining: u64) -> u16 {
-    remaining.min(u64::from(SMB_READ_MAX)) as u16
-}
-
 fn folder_summary(
     folder_summaries: &[(usize, MediaFolderSummary)],
     index: usize,
@@ -2086,23 +1717,15 @@ pub fn resolve_smb_uri<'a>(uri: &'a str) -> Result<CifsConfig<'a>, Error> {
 mod tests {
     use super::{
         is_likely_extra_video, is_media_entry, main_video_index, media_extra_kind,
-        media_presentations, read_count_for, resolve_smb_uri, retain_media_entries, seek_position,
+        media_presentations, resolve_smb_uri, retain_media_entries, seek_position,
         sort_dir_entries, MediaEntry, MediaExtraKind, MediaFolderSummary, MediaKind,
-        MediaPresentation, ReadAhead, SmbMediaStream, SmbMediaStreamOptions, StreamOptions,
-        StreamingBuffer, StreamingWorker, StreamingWorkerOptions, StreamingWorkerReadRequest,
-        StreamingWorkerState, StreamingWorkerStats, SMB_READ_MAX,
+        MediaPresentation, SmbMediaStream, SmbMediaStreamOptions, StreamOptions, StreamingBuffer,
+        StreamingWorker, StreamingWorkerOptions, StreamingWorkerReadRequest, StreamingWorkerState,
+        StreamingWorkerStats, SMB_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
     use std::io::SeekFrom;
-
-    #[test]
-    fn read_count_is_capped_to_smb_limit() {
-        assert_eq!(read_count_for(0), 0);
-        assert_eq!(read_count_for(1), 1);
-        assert_eq!(read_count_for(u64::from(SMB_READ_MAX)), SMB_READ_MAX);
-        assert_eq!(read_count_for(u64::from(SMB_READ_MAX) + 1), SMB_READ_MAX);
-    }
 
     #[test]
     fn stream_options_have_streaming_defaults() {
@@ -2120,20 +1743,6 @@ mod tests {
     fn stream_options_reject_zero_values() {
         assert!(StreamOptions::new(0, 1).is_err());
         assert!(StreamOptions::new(1, 0).is_err());
-    }
-
-    #[test]
-    fn stream_options_cap_chunk_size_to_smb_limit() {
-        let buffer = ReadAhead::with_options(
-            fake_stream(100),
-            StreamOptions {
-                read_ahead_capacity: usize::from(SMB_READ_MAX) + 10,
-                chunk_size: u16::MAX,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(buffer.next_read_count(), SMB_READ_MAX);
     }
 
     #[test]
@@ -2179,19 +1788,6 @@ mod tests {
     }
 
     #[test]
-    fn read_ahead_exposes_normalized_options() {
-        let buffer = ReadAhead::new(fake_stream(100), 10, u16::MAX);
-
-        assert_eq!(
-            buffer.options(),
-            StreamOptions {
-                read_ahead_capacity: 10,
-                chunk_size: SMB_READ_MAX,
-            }
-        );
-    }
-
-    #[test]
     fn seek_position_supports_common_origins() {
         assert_eq!(seek_position(100, 10, SeekFrom::Start(7)).unwrap(), 7);
         assert_eq!(seek_position(100, 10, SeekFrom::Current(5)).unwrap(), 15);
@@ -2202,145 +1798,6 @@ mod tests {
     fn seek_position_rejects_negative_offsets() {
         assert!(seek_position(100, 10, SeekFrom::Current(-11)).is_err());
         assert!(seek_position(100, 10, SeekFrom::End(-101)).is_err());
-    }
-
-    #[test]
-    fn read_ahead_tracks_buffered_bytes() {
-        let mut buffer = ReadAhead::new(fake_stream(100), 10, 4);
-
-        buffer.push_chunk(Bytes::from_static(b"abcd"));
-        buffer.push_chunk(Bytes::from_static(b"ef"));
-
-        assert_eq!(buffer.buffered_len(), 6);
-        assert_eq!(buffer.buffered_chunks(), 2);
-        assert_eq!(buffer.buffer_free(), 4);
-        assert_eq!(buffer.position(), 0);
-        assert_eq!(buffer.pop_chunk().unwrap().as_ref(), b"abcd");
-        assert_eq!(buffer.position(), 4);
-        assert_eq!(buffer.buffered_len(), 2);
-        assert_eq!(buffer.buffered_chunks(), 1);
-        assert_eq!(buffer.buffer_free(), 8);
-        assert_eq!(buffer.pop_chunk().unwrap().as_ref(), b"ef");
-        assert_eq!(buffer.position(), 6);
-        assert_eq!(buffer.buffered_len(), 0);
-        assert_eq!(buffer.buffered_chunks(), 0);
-        assert_eq!(buffer.buffer_free(), 10);
-    }
-
-    #[test]
-    fn read_ahead_seek_clears_buffer() {
-        let mut buffer = ReadAhead::new(fake_stream(100), 10, 4);
-        buffer.push_chunk(Bytes::from_static(b"abcd"));
-
-        assert_eq!(buffer.seek(SeekFrom::Start(25)).unwrap(), 25);
-        assert_eq!(buffer.buffered_len(), 0);
-        assert_eq!(buffer.position(), 25);
-        assert_eq!(buffer.source_position(), 25);
-        assert_eq!(buffer.pop_chunk(), None);
-        assert!(!buffer.is_eof());
-    }
-
-    #[test]
-    fn read_ahead_discard_buffer_drops_prefetched_data() {
-        let mut stream = fake_stream(100);
-        stream.seek(SeekFrom::Start(8)).unwrap();
-        let mut buffer = ReadAhead::new(stream, 10, 4);
-
-        buffer.push_chunk(Bytes::from_static(b"abcd"));
-        buffer.stream.seek(SeekFrom::Start(12)).unwrap();
-        buffer.discard_buffer();
-
-        assert_eq!(buffer.position(), 12);
-        assert_eq!(buffer.source_position(), 12);
-        assert_eq!(buffer.buffered_len(), 0);
-        assert_eq!(buffer.buffered_chunks(), 0);
-        assert_eq!(buffer.pop_chunk(), None);
-    }
-
-    #[test]
-    fn read_ahead_next_read_count_respects_capacity() {
-        let mut buffer = ReadAhead::new(fake_stream(100), 10, 8);
-
-        assert_eq!(buffer.next_read_count(), 8);
-        buffer.push_chunk(Bytes::from_static(b"abcdef"));
-        assert_eq!(buffer.next_read_count(), 4);
-    }
-
-    #[test]
-    fn read_ahead_next_read_count_can_target_requested_buffer() {
-        let mut buffer = ReadAhead::new(fake_stream(100), 10, 8);
-
-        assert_eq!(buffer.next_read_count_for(3), 3);
-        assert_eq!(buffer.next_read_count_for(20), 8);
-        buffer.push_chunk(Bytes::from_static(b"abcd"));
-        assert_eq!(buffer.next_read_count_for(6), 2);
-        assert_eq!(buffer.next_read_count_for(3), 0);
-    }
-
-    #[test]
-    fn read_ahead_pop_bytes_splits_front_chunk() {
-        let mut buffer = ReadAhead::new(fake_stream(100), 10, 8);
-        buffer.push_chunk(Bytes::from_static(b"abcdef"));
-
-        assert_eq!(buffer.pop_bytes(2).unwrap().as_ref(), b"ab");
-        assert_eq!(buffer.buffered_len(), 4);
-        assert_eq!(buffer.position(), 2);
-        assert_eq!(buffer.pop_bytes(10).unwrap().as_ref(), b"cdef");
-        assert_eq!(buffer.buffered_len(), 0);
-        assert_eq!(buffer.position(), 6);
-    }
-
-    #[test]
-    fn read_ahead_pop_bytes_rejects_zero_len() {
-        let mut buffer = ReadAhead::new(fake_stream(100), 10, 8);
-        buffer.push_chunk(Bytes::from_static(b"abcdef"));
-
-        assert_eq!(buffer.pop_bytes(0), None);
-        assert_eq!(buffer.buffered_len(), 6);
-    }
-
-    #[test]
-    fn read_ahead_pop_block_combines_buffered_chunks() {
-        let mut buffer = ReadAhead::new(fake_stream(100), 10, 8);
-        buffer.push_chunk(Bytes::from_static(b"ab"));
-        buffer.push_chunk(Bytes::from_static(b"cdef"));
-        buffer.push_chunk(Bytes::from_static(b"gh"));
-
-        assert_eq!(buffer.pop_block(5).unwrap().as_ref(), b"abcde");
-        assert_eq!(buffer.position(), 5);
-        assert_eq!(buffer.buffered_len(), 3);
-        assert_eq!(buffer.pop_block(10).unwrap().as_ref(), b"fgh");
-        assert_eq!(buffer.position(), 8);
-        assert_eq!(buffer.buffered_len(), 0);
-    }
-
-    #[test]
-    fn read_ahead_stats_report_playback_and_source_positions() {
-        let mut stream = fake_stream(100);
-        stream.seek(SeekFrom::Start(16)).unwrap();
-        let mut buffer = ReadAhead::new(stream, 10, 8);
-
-        buffer.push_chunk(Bytes::from_static(b"abcdef"));
-        buffer.stream.seek(SeekFrom::Start(22)).unwrap();
-        assert_eq!(buffer.pop_bytes(2).unwrap().as_ref(), b"ab");
-
-        assert_eq!(
-            buffer.stats(),
-            super::ReadAheadStats {
-                position: 18,
-                source_position: 22,
-                file_size: 100,
-                buffered: 4,
-                buffered_chunks: 1,
-                read_ahead_capacity: 10,
-                chunk_size: 8,
-                eof: false,
-            }
-        );
-        assert_eq!(buffer.stats().remaining(), 82);
-        assert_eq!(buffer.stats().buffer_free(), 6);
-        assert_eq!(buffer.stats().prefetched(), 4);
-        assert!(buffer.stats().is_buffering());
     }
 
     #[test]

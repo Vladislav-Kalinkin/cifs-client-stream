@@ -453,11 +453,11 @@ pub struct Read {
     tid: u16,
     fid: u16,
     offset: u64,
-    count: u16,
+    count: u32,
 }
 
 impl Read {
-    pub fn new(tid: u16, fid: u16, offset: u64, count: u16) -> Self {
+    pub fn new(tid: u16, fid: u16, offset: u64, count: u32) -> Self {
         Self {
             tid,
             fid,
@@ -466,7 +466,7 @@ impl Read {
         }
     }
 
-    pub fn handle(file: &Handle, offset: u64, count: u16) -> Self {
+    pub fn handle(file: &Handle, offset: u64, count: u32) -> Self {
         Self::new(file.tid, file.fid, offset, count)
     }
 }
@@ -486,18 +486,20 @@ impl Msg for Read {
         _data: &mut BytesMut,
     ) -> Result<(), Error> {
         // parameter
+        let count_low = (self.count & 0xffff) as u16;
+        let count_high = ((self.count >> 16) & 0xffff) as u16;
+
         parameter.put_u16_le(self.fid);
-        parameter.put_u32_le((self.offset & 0xffffffff) as u32);
-        parameter.put_u16_le(self.count.min(SMB_READ_MAX));
+        parameter.put_u32_le((self.offset & 0xffff_ffff) as u32);
+        parameter.put_u16_le(count_low);
         parameter.put_u16_le(SMB_READ_MIN);
 
-        // the following is either higher bytes of max_count (file)
-        // or a timeout in ms (pipe)
-        parameter.put_u32_le(0);
-
-        // 'remaining' bytes (ignored by modern dialects)
+        // Timeout_or_MaxCountHigh:
+        // for file reads, the low 16 bits are MaxCountHigh and high 16 bits are reserved.
+        parameter.put_u16_le(count_high);
         parameter.put_u16_le(0);
 
+        parameter.put_u16_le(0);
         parameter.put_u32_le((self.offset >> 32) as u32);
 
         Ok(())

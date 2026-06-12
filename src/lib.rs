@@ -16,14 +16,16 @@ use regex::Regex;
 
 use crate::netbios::NetBios;
 use crate::smb::info::{Cmd, Flags2, Info, Status};
-use crate::smb::{msg, reply, trans2, Capabilities, DirInfo, SMB_READ_MAX};
+use crate::smb::{msg, reply, trans2, Capabilities, DirInfo, SMB_LEGACY_READ_MAX};
 use crate::utils::sanitize_path;
 use crate::win::{ExtFileAttr, FileAttr, NTStatus};
 
 const DEFAULT_READ_AHEAD_CAPACITY: usize = 8 * 1024 * 1024;
-const DEFAULT_STREAM_CHUNK_SIZE: u16 = SMB_READ_MAX;
+const DEFAULT_STREAM_CHUNK_SIZE: u32 = SMB_LEGACY_READ_MAX;
 const DEFAULT_MEDIA_INITIAL_BUFFER_SIZE: usize = 1024 * 1024;
 const DEFAULT_MEDIA_PREFILL_TARGET_SIZE: usize = 2 * 1024 * 1024;
+const DEFAULT_SMB1_PIPELINE_DEPTH: usize = 8;
+
 const AUDIO_EXTENSIONS: &[&str] = &[
     "aac", "aiff", "alac", "flac", "m4a", "mp3", "ogg", "opus", "wav",
 ];
@@ -199,7 +201,7 @@ enum NaturalToken {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamOptions {
     pub read_ahead_capacity: usize,
-    pub chunk_size: u16,
+    pub chunk_size: u32,
 }
 
 impl Default for StreamOptions {
@@ -212,7 +214,7 @@ impl Default for StreamOptions {
 }
 
 impl StreamOptions {
-    pub fn new(read_ahead_capacity: usize, chunk_size: u16) -> Result<Self, Error> {
+    pub fn new(read_ahead_capacity: usize, chunk_size: u32) -> Result<Self, Error> {
         let options = Self {
             read_ahead_capacity,
             chunk_size,
@@ -222,6 +224,12 @@ impl StreamOptions {
     }
 
     pub fn validate(&self) -> Result<(), Error> {
+        if self.chunk_size > 1024 * 1024 {
+            return Err(Error::InvalidConfig(
+                "stream chunk size must not exceed 1 MiB".to_owned(),
+            ));
+        }
+
         if self.read_ahead_capacity == 0 {
             return Err(Error::InvalidConfig(
                 "read-ahead capacity must be greater than zero".to_owned(),
@@ -233,6 +241,10 @@ impl StreamOptions {
             ));
         }
         Ok(())
+    }
+
+    pub fn effective_chunk_size(&self) -> u32 {
+        self.chunk_size.min(SMB_LEGACY_READ_MAX)
     }
 }
 
@@ -251,7 +263,7 @@ impl Default for StreamingWorkerOptions {
             stream_options,
             low_watermark: stream_options.read_ahead_capacity / 4,
             high_watermark: stream_options.read_ahead_capacity,
-            pipeline_depth: 1,
+            pipeline_depth: DEFAULT_SMB1_PIPELINE_DEPTH,
         }
     }
 }
@@ -328,10 +340,11 @@ impl Default for SmbMediaStreamOptions {
     fn default() -> Self {
         let stream_options = StreamOptions::default();
         let initial_buffer_size = DEFAULT_MEDIA_INITIAL_BUFFER_SIZE;
-        let worker_options = StreamingWorkerOptions::new(
+        let worker_options = StreamingWorkerOptions::new_with_pipeline_depth(
             stream_options,
             initial_buffer_size,
             DEFAULT_MEDIA_PREFILL_TARGET_SIZE,
+            DEFAULT_SMB1_PIPELINE_DEPTH,
         )
         .expect("default SMB media stream options must be valid");
 
@@ -565,7 +578,7 @@ impl StreamingWorkerState {
                 break;
             }
 
-            let count = free.min(usize::from(self.options.stream_options.chunk_size));
+            let count = free.min(self.options.stream_options.effective_chunk_size() as usize);
             let remaining = self.file_size.saturating_sub(simulated_source_position);
 
             let len = if remaining > usize::MAX as u64 {
@@ -592,6 +605,12 @@ impl StreamingWorkerState {
 
     pub fn push_source_chunk(&mut self, chunk: Bytes) -> Result<(), Error> {
         if chunk.is_empty() {
+            if self.source_position < self.file_size {
+                return Err(Error::InternalError(
+                    "streaming worker source returned empty chunk before EOF".to_owned(),
+                ));
+            }
+
             self.source_eof = true;
             return Ok(());
         }
@@ -1234,7 +1253,7 @@ impl Cifs {
         self.close(stream.into_handle()).await
     }
 
-    async fn read_at(&mut self, file: &Handle, offset: u64, count: u16) -> Result<Bytes, Error> {
+    async fn read_at(&mut self, file: &Handle, offset: u64, count: u32) -> Result<Bytes, Error> {
         if count == 0 {
             return Ok(Bytes::new());
         }
@@ -1259,7 +1278,7 @@ impl Cifs {
 
         if requests.len() == 1 {
             let request = requests[0];
-            let count: u16 = request.len.try_into()?;
+            let count: u32 = request.len.try_into()?;
             let chunk = self.read_at(file, request.offset, count).await?;
             return Ok(vec![chunk]);
         }
@@ -1267,7 +1286,7 @@ impl Cifs {
         let mut in_flight = Vec::with_capacity(requests.len());
 
         for request in requests {
-            let count: u16 = request.len.try_into()?;
+            let count: u32 = request.len.try_into()?;
             let started = Instant::now();
             let mid = self
                 .send(msg::Read::handle(file, request.offset, count))
@@ -1793,7 +1812,7 @@ mod tests {
         sort_dir_entries, MediaEntry, MediaExtraKind, MediaFolderSummary, MediaKind,
         MediaPresentation, SmbMediaStream, SmbMediaStreamOptions, StreamOptions, StreamingBuffer,
         StreamingWorker, StreamingWorkerOptions, StreamingWorkerReadRequest, StreamingWorkerState,
-        StreamingWorkerStats, SMB_READ_MAX,
+        StreamingWorkerStats, DEFAULT_SMB1_PIPELINE_DEPTH, SMB_LEGACY_READ_MAX,
     };
     use bytes::Bytes;
     use chrono::Local;
@@ -1807,7 +1826,7 @@ mod tests {
             options.read_ahead_capacity,
             super::DEFAULT_READ_AHEAD_CAPACITY
         );
-        assert_eq!(options.chunk_size, SMB_READ_MAX);
+        assert_eq!(options.chunk_size, SMB_LEGACY_READ_MAX);
         assert!(options.validate().is_ok());
     }
 
@@ -1830,7 +1849,7 @@ mod tests {
             options.high_watermark,
             options.stream_options.read_ahead_capacity
         );
-        assert_eq!(options.pipeline_depth, 1);
+        assert_eq!(options.pipeline_depth, DEFAULT_SMB1_PIPELINE_DEPTH);
         assert!(options.validate().is_ok());
     }
 

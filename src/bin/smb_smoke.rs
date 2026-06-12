@@ -49,7 +49,7 @@ async fn run() -> Result<(), Error> {
         "SMB_READ_AHEAD_BYTES",
         default_stream_options.read_ahead_capacity,
     );
-    let chunk_size = env_u16("SMB_CHUNK_SIZE", default_stream_options.chunk_size);
+    let chunk_size = env_u32("SMB_CHUNK_SIZE", default_stream_options.chunk_size);
     let stream_options = StreamOptions::new(read_ahead_bytes, chunk_size)?;
 
     let print_entries = env_bool("SMB_PRINT_ENTRIES", false);
@@ -57,7 +57,10 @@ async fn run() -> Result<(), Error> {
     let scan_folder_summaries = env_bool("SMB_SCAN_FOLDER_SUMMARIES", false);
     let worker_prefill_high = env_bool("SMB_WORKER_PREFILL_HIGH", false);
     let worker_initial_buffer = env_usize("SMB_WORKER_INITIAL_BUFFER_BYTES", 1024 * 1024);
-    let pipeline_depth = env_usize("SMB_PIPELINE_DEPTH", 1);
+    let pipeline_depth = env_usize(
+        "SMB_PIPELINE_DEPTH",
+        StreamingWorkerOptions::default().pipeline_depth,
+    );
 
     let timeout = Duration::from_millis(timeout);
 
@@ -171,11 +174,12 @@ async fn run() -> Result<(), Error> {
 
     if let Some(path) = read_path {
         println!(
-            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} chunk_size={} mode=media-stream print_blocks={} prefill_high={} pipeline_depth={}",
+            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} configured_chunk_size={} effective_chunk_size={} mode=media-stream print_blocks={} prefill_high={} pipeline_depth={}",
             read_bytes,
             read_blocks,
             stream_options.read_ahead_capacity,
             stream_options.chunk_size,
+            stream_options.effective_chunk_size(),
             print_blocks,
             worker_prefill_high,
             pipeline_depth
@@ -591,7 +595,7 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn env_u16(name: &str, default: u16) -> u16 {
+fn env_u32(name: &str, default: u32) -> u32 {
     env::var(name)
         .ok()
         .and_then(|value| value.parse().ok())

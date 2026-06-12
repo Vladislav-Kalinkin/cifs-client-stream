@@ -5,6 +5,6 @@ pub mod msg;
 pub mod reply;
 pub mod trans2;
 
-pub(crate) use self::common::SMB_READ_MAX;
+pub(crate) use self::common::SMB_LEGACY_READ_MAX;
 pub use self::common::{Capabilities, DirInfo};
 pub use self::error::Error;

@@ -13,7 +13,7 @@ pub(crate) const SMB_HEADER_LEN: usize = 32;
 pub(crate) const SMB_MAGIC: &[u8] = b"\xffSMB";
 pub(crate) const SMB_SUPPORTED_DIALECTS: &[&str] = &["NT LM 0.12"];
 pub(crate) const SMB_READ_MIN: u16 = 32768;
-pub(crate) const SMB_READ_MAX: u16 = 65534;
+pub(crate) const SMB_LEGACY_READ_MAX: u32 = 65_534;
 
 bitflags! {
     pub struct Capabilities: u32 {

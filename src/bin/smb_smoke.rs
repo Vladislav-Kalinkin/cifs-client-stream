@@ -53,6 +53,7 @@ async fn run() -> Result<(), Error> {
     let print_entries = env_bool("SMB_PRINT_ENTRIES", false);
     let worker_prefill = env_bool("SMB_WORKER_PREFILL", false);
     let worker_buffer_goal = env_usize("SMB_WORKER_BUFFER_GOAL_BYTES", 0);
+    let worker_initial_buffer = env_usize("SMB_WORKER_INITIAL_BUFFER_BYTES", 0);
 
     let timeout = Duration::from_millis(timeout);
 
@@ -121,6 +122,8 @@ async fn run() -> Result<(), Error> {
                 "streaming-worker-prefill"
             } else if use_streaming_worker && worker_buffer_goal > 0 {
                 "streaming-worker-buffer-goal"
+            } else if use_streaming_worker && worker_initial_buffer > 0 {
+                "streaming-worker-initial-buffer"
             } else if use_streaming_worker {
                 "streaming-worker"
             } else {
@@ -145,11 +148,12 @@ async fn run() -> Result<(), Error> {
             )?;
 
             println!(
-                "worker options: low_watermark={} high_watermark={} read_request_size={} buffer_goal={}",
+                "worker options: low_watermark={} high_watermark={} read_request_size={} buffer_goal={} initial_buffer={}",
                 worker_options.low_watermark,
                 worker_options.high_watermark,
                 worker_options.read_request_size,
-                worker_buffer_goal
+                worker_buffer_goal,
+                worker_initial_buffer
             );
 
             let mut worker = cifs
@@ -190,6 +194,42 @@ async fn run() -> Result<(), Error> {
                     source_delta,
                     prefill_elapsed,
                     prefill_mbps,
+                    after.buffered,
+                    after.buffered_chunks
+                );
+            }
+
+            if !worker_prefill && worker_initial_buffer > 0 {
+                let before = worker.stats();
+                let initial_started = Instant::now();
+
+                worker
+                    .fill_until_buffered_timeout(&mut cifs, worker_initial_buffer, timeout)
+                    .await?;
+
+                let initial_elapsed = initial_started.elapsed();
+                let after = worker.stats();
+                let source_delta = after.source_position.saturating_sub(before.source_position);
+
+                initial_prefill_elapsed = initial_elapsed;
+                initial_prefill_bytes = source_delta as usize;
+
+                let initial_mbps = if initial_elapsed.is_zero() {
+                    0.0
+                } else {
+                    (source_delta as f64 / (1024.0 * 1024.0)) / initial_elapsed.as_secs_f64()
+                };
+
+                println!(
+                    concat!(
+                        "initial worker buffer: source {}->{} source_delta={} ",
+                        "in {:?} ({:.2} MiB/s) buffered={} chunks={}"
+                    ),
+                    before.source_position,
+                    after.source_position,
+                    source_delta,
+                    initial_elapsed,
+                    initial_mbps,
                     after.buffered,
                     after.buffered_chunks
                 );
@@ -297,14 +337,14 @@ async fn run() -> Result<(), Error> {
                 total, path, elapsed, mbps, slowest
             );
 
-            if worker_prefill {
-                let total_with_prefill = elapsed + initial_prefill_elapsed;
-                let delivered_mbps_with_prefill = if total_with_prefill.is_zero() {
+            if worker_prefill || worker_initial_buffer > 0 {
+                let total_with_initial = elapsed + initial_prefill_elapsed;
+                let delivered_mbps_with_initial = if total_with_initial.is_zero() {
                     0.0
                 } else {
-                    (total as f64 / (1024.0 * 1024.0)) / total_with_prefill.as_secs_f64()
+                    (total as f64 / (1024.0 * 1024.0)) / total_with_initial.as_secs_f64()
                 };
-                let source_mbps_with_prefill = if initial_prefill_elapsed.is_zero() {
+                let source_mbps_with_initial = if initial_prefill_elapsed.is_zero() {
                     0.0
                 } else {
                     (initial_prefill_bytes as f64 / (1024.0 * 1024.0))
@@ -312,16 +352,12 @@ async fn run() -> Result<(), Error> {
                 };
 
                 println!(
-                    concat!(
-                        "total including initial prefill: delivered={} bytes in {:?} ",
-                        "({:.2} MiB/s delivered), initial_prefill={} bytes ",
-                        "({:.2} MiB/s source)"
-                    ),
+                    "total including initial buffer: delivered={} bytes in {:?} ({:.2} MiB/s delivered), initial_buffer={} bytes ({:.2} MiB/s source)",
                     total,
-                    total_with_prefill,
-                    delivered_mbps_with_prefill,
+                    total_with_initial,
+                    delivered_mbps_with_initial,
                     initial_prefill_bytes,
-                    source_mbps_with_prefill
+                    source_mbps_with_initial
                 );
             }
 

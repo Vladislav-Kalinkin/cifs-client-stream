@@ -49,19 +49,19 @@ SMB_TIMEOUT_MS                   operation timeout
 ## Root listing
 
 ```sh
-SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_PRINT_ENTRIES=1 SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='REDACTED' SMB_PRINT_ENTRIES=1 SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
 ## Nested folder listing
 
 ```sh
-SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_LIST_PATH='/Movies' SMB_PRINT_ENTRIES=1 SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='REDACTED' SMB_LIST_PATH='/Movies' SMB_PRINT_ENTRIES=1 SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
 ## Movie-folder scan
 
 ```sh
-SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_LIST_PATH='/Movies' SMB_PRINT_ENTRIES=1 SMB_SCAN_FOLDER_SUMMARIES=1 SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='REDACTED' SMB_LIST_PATH='/Movies' SMB_PRINT_ENTRIES=1 SMB_SCAN_FOLDER_SUMMARIES=1 SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
 Movie-folder detection is conservative. A folder with several unmarked videos
@@ -71,7 +71,7 @@ may become `movie-folder`.
 ## Sequential read test
 
 ```sh
-SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_READ_PATH='/path/to/movie.mkv' SMB_READ_BYTES=262144 SMB_READ_BLOCKS=256 SMB_REPORT_PATH='smoke-report-airport.txt' SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='REDACTED' SMB_READ_PATH='/path/to/movie.mkv' SMB_READ_BYTES=262144 SMB_READ_BLOCKS=256 SMB_REPORT_PATH='smoke-report-airport.txt' SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
 Recommended release checks:
@@ -85,7 +85,7 @@ SMB_READ_BLOCKS=4096    1 GiB long read
 ## Seek test
 
 ```sh
-SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_READ_PATH='/path/to/movie.mkv' SMB_READ_BYTES=262144 SMB_SEEK_TEST=1 SMB_REPORT_PATH='smoke-report-airport-seek.txt' SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='REDACTED' SMB_READ_PATH='/path/to/movie.mkv' SMB_READ_BYTES=262144 SMB_SEEK_TEST=1 SMB_REPORT_PATH='smoke-report-airport-seek.txt' SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
 The seek test performs read checks at:

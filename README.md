@@ -138,7 +138,7 @@ SMB_DOMAIN    optional workgroup/domain
 Example:
 
 ```sh
-SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' cargo run --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='REDACTED' cargo run --bin smb_smoke
 ```
 
 `SMB_URI` is optional and can still be used as a shortcut.
@@ -148,19 +148,19 @@ SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' car
 ### Root listing
 
 ```sh
-SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_PRINT_ENTRIES=1 SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='REDACTED' SMB_PRINT_ENTRIES=1 SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
 ### Sequential read with report file
 
 ```sh
-SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_READ_PATH='/path/to/movie.mkv' SMB_READ_BYTES=262144 SMB_READ_BLOCKS=256 SMB_REPORT_PATH='smoke-report-airport.txt' SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='REDACTED' SMB_READ_PATH='/path/to/movie.mkv' SMB_READ_BYTES=262144 SMB_READ_BLOCKS=256 SMB_REPORT_PATH='smoke-report-airport.txt' SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
 ### Seek smoke
 
 ```sh
-SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_READ_PATH='/path/to/movie.mkv' SMB_READ_BYTES=262144 SMB_SEEK_TEST=1 SMB_REPORT_PATH='smoke-report-airport-seek.txt' SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='REDACTED' SMB_READ_PATH='/path/to/movie.mkv' SMB_READ_BYTES=262144 SMB_SEEK_TEST=1 SMB_REPORT_PATH='smoke-report-airport-seek.txt' SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
 The seek smoke test checks reads from the start, quarter, half, near-end and

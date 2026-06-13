@@ -2,7 +2,8 @@
 
 ## Current milestone
 
-The current milestone is a reliable read-only SMB1 backend smoke-testable by technical users.
+The current milestone is a reliable read-only SMB1 backend that is ready to be
+used as the foundation for an Apex playback prototype.
 
 Completed:
 
@@ -16,65 +17,41 @@ Completed:
 - Pipelined SMB1 reads.
 - Effective chunk reporting.
 - AirPort-tested default pipeline behavior.
+- Copyable smoke report summaries.
+- Optional smoke report file saving.
+- Release smoke tests.
+- Long 512 MiB / 1 GiB smoke tests.
+- Aggressive 4K stress-read smoke test.
+- Seek smoke test.
+- Basic error scenario checks.
 
 ## Near-term
 
-### 1. Documentation
+### 1. Freeze SMB1 as preliminary ready
 
-- Keep README current.
-- Add `docs/SMOKE_TESTING.md`.
-- Add `docs/TEST_REPORT_TEMPLATE.txt`.
-- Add `docs/ARCHITECTURE.md`.
-- Add `docs/ROADMAP.md`.
-
-### 2. Public backend smoke test readiness
-
-- Add friendlier smoke output.
-- Add automatic report file generation.
-- Add clear password redaction guidance.
-- Add Windows-friendly command examples.
-- Add a small CLI wizard.
-
-### 3. Stability testing
-
-Test matrix:
+Before moving fully to Apex prototype work:
 
 ```text
-AirPort Extreme + USB HDD
-Time Capsule
-Samba SMB1
-Windows legacy SMB share
-NAS/router SMB1
-non-English filenames
-large 4K WEB-DL files
-folders with extras
-movie collections
-TV seasons
+cargo fmt
+cargo check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
 ```
 
-### 4. Performance
+Then keep the current SMB1 backend stable unless Apex integration reveals a real
+playback problem.
 
-Current known AirPort strategy:
+### 2. Playback readiness
 
-```text
-effective chunk size: 65534
-pipeline depth: 8
-foreground refill target: low watermark
-high watermark: reserved for prefill/background refill
-```
-
-Potential future performance work:
+Potential future SMB/backend work should be driven by Apex needs:
 
 - Background refill.
-- Adaptive pipeline fallback on timeout/errors.
-- Better wall-clock source read metrics.
-- Non-AirPort Large ReadX experiments.
-- Release build comparisons.
-- Longer warm/cold disk runs.
+- Better playback-style long-run diagnostics.
+- More precise buffering metrics.
+- Optional adaptive fallback if a server dislikes pipeline depth 8.
+- Optional non-AirPort Large ReadX experiment.
 
 ## Medium-term
-
-### 1. Backend abstraction
 
 Introduce a higher-level remote media abstraction before adding more protocols:
 
@@ -87,56 +64,18 @@ seek
 close
 ```
 
-This should allow SMB1, SMB2/3, WebDAV and HTTP(S) backends to share upper layers.
-
-### 2. SMB2/3
-
-Do not rewrite SMB2/3 from scratch first.
-
-Plan:
-
-1. Evaluate existing Rust SMB2/3 libraries.
-2. Build a separate `smb2_smoke`.
-3. Test connect/auth/list/read/seek/Unicode paths.
-4. Wrap it behind the same remote media abstraction.
-5. Keep SMB1 backend stable and separate.
-
-### 3. HTTP/WebDAV
-
-For Apple platforms:
-
-```text
-HLS / direct playable URL -> AVFoundation
-WebDAV / custom auth / virtual paths -> Rust backend or ResourceLoader bridge
-SMB -> Rust backend
-```
-
-Avoid mixing transport, container parsing and decoding into one layer.
+Then evaluate SMB2/3 and WebDAV as separate backends.
 
 ## Long-term
 
-### 1. Apex integration
+Apex integration:
 
 - Swift/tvOS bridge.
 - Keychain password storage.
 - Connection manager UI.
 - Folder browser.
 - Library/cache layer.
-- TMDb matching.
-- Poster/backdrop cache.
 - Details page.
 - Extras row.
 - Continue watching.
 - Seek integration.
-
-### 2. Playback strategy
-
-Prefer:
-
-```text
-AVPlayer where possible
-AVAssetResourceLoader or local range bridge where needed
-optional remux/probe helper later
-```
-
-Avoid making FFmpeg a required early tvOS dependency.

@@ -17,7 +17,7 @@ body:
     id: summary
     attributes:
       label: SMOKE REPORT SUMMARY
-      description: Paste the final SMOKE REPORT SUMMARY block here.
+      description: Paste the final SMOKE REPORT SUMMARY or SMOKE SEEK TEST SUMMARY block here.
       placeholder: |
         --- SMOKE REPORT SUMMARY ---
         read_path: ...
@@ -72,12 +72,8 @@ body:
       description: Remove passwords before posting.
       render: shell
       placeholder: |
-        SMB_HOST='...' \
-        SMB_SHARE='...' \
-        SMB_USER='...' \
-        SMB_PASSWORD='REDACTED' \
-        ...
-        cargo run --bin smb_smoke
+        SMB_HOST='...'         SMB_SHARE='...'         SMB_USER='...'         SMB_PASSWORD='REDACTED'         ...
+        cargo run --release --bin smb_smoke
     validations:
       required: false
 
@@ -85,6 +81,6 @@ body:
     id: notes
     attributes:
       label: Notes
-      description: Mention timeouts, disconnects, non-English filenames, folder classification problems, or unusual behavior.
+      description: Mention timeouts, disconnects, non-English filenames, folder classification problems, seek problems, or unusual behavior.
     validations:
       required: false

@@ -30,6 +30,8 @@ TEST TYPE
 [ ] Movie-folder scan
 [ ] Sequential read 256 blocks
 [ ] Sequential read 2048 blocks
+[ ] Sequential read 4096 blocks
+[ ] Seek smoke test
 [ ] Pipeline comparison
 [ ] Non-AirPort Large ReadX experiment
 
@@ -57,6 +59,18 @@ block latency p99:
 slowest block:
 internal read calls:
 internal avg_size:
+errors/timeouts:
+
+SEEK TEST RESULTS, if applicable
+file_size:
+seek_read_bytes:
+seek_steps:
+start:
+quarter:
+half:
+near_end:
+back_to_10_percent:
+internal read calls:
 errors/timeouts:
 
 FULL OUTPUT

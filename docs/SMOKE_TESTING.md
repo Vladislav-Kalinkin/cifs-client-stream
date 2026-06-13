@@ -1,27 +1,19 @@
 # Smoke testing cifs-client-stream
 
-This document describes how to run technical backend smoke tests for `cifs-client-stream`.
+This document describes how to run technical backend smoke tests for
+`cifs-client-stream`.
 
-These tests are **not** a public Apex beta. They validate the SMB1 backend: connect, mount, list directories, classify media entries, scan movie folders, and read blocks from large files.
+These tests are **not** a public Apex beta. They validate the SMB1 backend:
+connect, mount, list directories, classify media entries, scan movie folders,
+read blocks from large files, and seek within media streams.
 
 ## Requirements
 
 - Rust toolchain installed.
 - Access to an SMB1 share.
 - Hostname/IP, share name, username and password.
-- A large video file for sequential read tests.
+- A large video file for sequential read and seek tests.
 - A terminal.
-
-Useful targets:
-
-```text
-AirPort Extreme + USB HDD
-Time Capsule
-old NAS
-Samba server with SMB1 enabled
-Windows legacy share
-router/NAS with SMB1/CIFS support
-```
 
 ## Environment variables
 
@@ -50,194 +42,79 @@ SMB_PIPELINE_DEPTH               in-flight SMB reads, default 8
 SMB_PRINT_ENTRIES                print directory entries
 SMB_PRINT_BLOCKS                 print per-block read diagnostics
 SMB_SCAN_FOLDER_SUMMARIES        scan child folders for movie-folder detection
+SMB_SEEK_TEST                    run seek/read validation instead of sequential read
 SMB_TIMEOUT_MS                   operation timeout
 ```
 
-## 1. Root listing
+## Root listing
 
 ```sh
-SMB_HOST='10.0.1.1' \
-SMB_SHARE='HARD' \
-SMB_USER='user' \
-SMB_PASSWORD='password' \
-SMB_PRINT_ENTRIES=1 \
-SMB_TIMEOUT_MS=15000 \
-cargo run --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_PRINT_ENTRIES=1 SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
-Expected:
-
-```text
-using SMB share from environment: HARD
-connected to \\10.0.1.1\HARD
-listed pattern: *
-media entries in first batch: ...
-```
-
-## 2. Nested folder listing
+## Nested folder listing
 
 ```sh
-SMB_HOST='10.0.1.1' \
-SMB_SHARE='HARD' \
-SMB_USER='user' \
-SMB_PASSWORD='password' \
-SMB_LIST_PATH='/Movies' \
-SMB_PRINT_ENTRIES=1 \
-SMB_TIMEOUT_MS=15000 \
-cargo run --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_LIST_PATH='/Movies' SMB_PRINT_ENTRIES=1 SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
-Use a real folder path inside your share.
-
-## 3. Movie-folder scan
+## Movie-folder scan
 
 ```sh
-SMB_HOST='10.0.1.1' \
-SMB_SHARE='HARD' \
-SMB_USER='user' \
-SMB_PASSWORD='password' \
-SMB_LIST_PATH='/Movies' \
-SMB_PRINT_ENTRIES=1 \
-SMB_SCAN_FOLDER_SUMMARIES=1 \
-SMB_TIMEOUT_MS=15000 \
-cargo run --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_LIST_PATH='/Movies' SMB_PRINT_ENTRIES=1 SMB_SCAN_FOLDER_SUMMARIES=1 SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
-The output may classify entries as:
+Movie-folder detection is conservative. A folder with several unmarked videos
+remains a folder/collection. A folder with one main video and flagged extras
+may become `movie-folder`.
 
-```text
-folder
-movie-folder
-playable-file
-```
-
-Movie-folder detection is conservative. A folder with several unmarked videos remains a folder/collection. A folder with one main video and flagged extras may become `movie-folder`.
-
-Recognized extra markers include:
-
-```text
---extra
---bonus
---deleted
---deleted-scene
---deleted-scenes
---short
---trailer
---teaser
---featurette
---behind
---behind-the-scenes
---interview
---sample
-```
-
-## 4. Sequential read test
+## Sequential read test
 
 ```sh
-SMB_HOST='10.0.1.1' \
-SMB_SHARE='HARD' \
-SMB_USER='user' \
-SMB_PASSWORD='password' \
-SMB_READ_PATH='/path/to/movie.mkv' \
-SMB_READ_BYTES=262144 \
-SMB_READ_BLOCKS=256 \
-SMB_TIMEOUT_MS=15000 \
-cargo run --bin smb_smoke
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_READ_PATH='/path/to/movie.mkv' SMB_READ_BYTES=262144 SMB_READ_BLOCKS=256 SMB_REPORT_PATH='smoke-report-airport.txt' SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
-For a longer stability test:
+Recommended release checks:
 
 ```text
-SMB_READ_BLOCKS=2048
+SMB_READ_BLOCKS=256     64 MiB short read
+SMB_READ_BLOCKS=2048    512 MiB long read
+SMB_READ_BLOCKS=4096    1 GiB long read
 ```
 
-This reads 512 MiB when `SMB_READ_BYTES=262144`.
-
-## 5. Pipeline override tests
-
-Default pipeline depth is 8. To compare behavior:
-
-```text
-SMB_PIPELINE_DEPTH=1
-SMB_PIPELINE_DEPTH=2
-SMB_PIPELINE_DEPTH=4
-SMB_PIPELINE_DEPTH=8
-```
-
-For AirPort Extreme, current testing indicates:
-
-```text
-pipeline_depth=8 is the best current candidate
-pipeline_depth=16 is too aggressive
-```
-
-## 6. Configured vs effective chunk size
-
-The smoke output prints both:
-
-```text
-configured_chunk_size=...
-effective_chunk_size=...
-```
-
-For AirPort / normal SMB1 mode, effective chunk size is clamped to:
-
-```text
-65534 bytes
-```
-
-Example:
+## Seek test
 
 ```sh
-SMB_CHUNK_SIZE=131072
+SMB_HOST='10.0.1.1' SMB_SHARE='HARD' SMB_USER='user' SMB_PASSWORD='password' SMB_READ_PATH='/path/to/movie.mkv' SMB_READ_BYTES=262144 SMB_SEEK_TEST=1 SMB_REPORT_PATH='smoke-report-airport-seek.txt' SMB_TIMEOUT_MS=15000 cargo run --release --bin smb_smoke
 ```
 
-may still report:
+The seek test performs read checks at:
 
 ```text
-configured_chunk_size=131072
-effective_chunk_size=65534
+start
+quarter
+half
+near_end
+back_to_10_percent
 ```
 
-That means the backend is protecting the normal SMB1 path and still using legacy-safe 64 KiB reads.
-
-## 7. How to read performance output
-
-Important lines:
+A successful seek test means:
 
 ```text
-initial worker buffer: ...
-initial source reads: calls=... avg_size=... avg_latency=... summed_source_time=...
-read ... MiB/s
-refill blocks: ... p95 ... p99 ...
-cached blocks: ...
-block latency: p95 ... p99 ...
-stream source reads: calls=... avg_size=...
-total including initial buffer: ...
+actual_offset matches requested_offset
+read_len is non-zero
+near_end does not read beyond EOF
+backward seek clears the old buffer and reads from the new position
 ```
 
-Meaning:
+## Configured vs effective chunk size
 
-- `read ... MiB/s`: read phase wall-clock throughput.
-- `total including initial buffer`: throughput including startup buffering.
-- `refill blocks`: blocks that required source reads.
-- `cached blocks`: blocks served from the local buffer.
-- `p95` / `p99`: latency tail. Very important for playback.
-- `avg_size`: average internal SMB read size.
-- `summed_source_time`: sum of individual read latencies. With pipelining this is **not wall-clock time**.
+For AirPort / normal SMB1 mode, effective chunk size is clamped to 65534 bytes.
+If `SMB_CHUNK_SIZE=131072` is set but `effective_chunk_size=65534`, the backend
+is protecting the normal SMB1 path and still using legacy-safe 64 KiB reads.
 
-For playback, stable p95/p99 is often more important than a single high average speed.
+## What to report
 
-## 8. What to report
-
-Please include:
-
-- OS and machine running the test.
-- SMB server/device model.
-- Wired or Wi-Fi.
-- HDD/SSD if known.
-- Exact command used.
-- Full smoke output.
-- Whether filenames contain non-English characters.
-- Whether the folder contains movie extras.
-- Whether the run was cold HDD wake-up or warm disk.
+Please include OS, SMB server/device model, network type, disk type if known,
+the exact command used, full smoke output, and whether the run was cold HDD
+wake-up or warm disk.

@@ -1,11 +1,12 @@
 use std::env;
+use std::io::SeekFrom;
 use std::time::Duration;
 use std::time::Instant;
 
 use cifs_client_stream::{
     Auth, Cifs, CifsIoStats, Error, MediaEntry, MediaFolderSummary, MediaPresentation, Share,
-    SmbMediaStreamOptions, StreamOptions, StreamingWorkerOptions, StreamingWorkerStats,
-    media_presentations, media_presentations_with_summaries, resolve_smb_uri,
+    SmbMediaStream, SmbMediaStreamOptions, StreamOptions, StreamingWorkerOptions,
+    StreamingWorkerStats, media_presentations, media_presentations_with_summaries, resolve_smb_uri,
 };
 
 const DEFAULT_READ_BYTES: usize = 256 * 1024;
@@ -57,6 +58,7 @@ async fn run() -> Result<(), Error> {
     let print_blocks = env_bool("SMB_PRINT_BLOCKS", false);
     let scan_folder_summaries = env_bool("SMB_SCAN_FOLDER_SUMMARIES", false);
     let worker_prefill_high = env_bool("SMB_WORKER_PREFILL_HIGH", false);
+    let seek_test = env_bool("SMB_SEEK_TEST", false);
     let worker_initial_buffer = env_usize("SMB_WORKER_INITIAL_BUFFER_BYTES", 1024 * 1024);
     let pipeline_depth = env_usize(
         "SMB_PIPELINE_DEPTH",
@@ -175,7 +177,7 @@ async fn run() -> Result<(), Error> {
 
     if let Some(path) = read_path {
         println!(
-            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} configured_chunk_size={} effective_chunk_size={} mode=media-stream print_blocks={} prefill_high={} pipeline_depth={}",
+            "stream options: read_bytes={} read_blocks={} read_ahead_capacity={} configured_chunk_size={} effective_chunk_size={} mode=media-stream print_blocks={} prefill_high={} seek_test={} pipeline_depth={}",
             read_bytes,
             read_blocks,
             stream_options.read_ahead_capacity,
@@ -183,6 +185,7 @@ async fn run() -> Result<(), Error> {
             stream_options.effective_chunk_size(),
             print_blocks,
             worker_prefill_high,
+            seek_test,
             pipeline_depth
         );
 
@@ -254,105 +257,122 @@ async fn run() -> Result<(), Error> {
             cifs.reset_io_stats();
         }
 
-        let started = Instant::now();
-        let mut measurements = SmokeMeasurements::new(read_blocks);
-        let mut prefill_measurements = SmokePrefillMeasurements::default();
+        if seek_test {
+            cifs.reset_io_stats();
 
-        for block_index in 0..read_blocks {
-            let before = media_stream.stats();
-            let block_started = Instant::now();
-            let block = media_stream
-                .read_block_timeout(&mut cifs, read_bytes, timeout)
-                .await?
-                .unwrap_or_default();
-            let block_elapsed = block_started.elapsed();
-            let after = media_stream.stats();
+            let started = Instant::now();
+            let seek_measurements =
+                run_seek_smoke_test(&mut cifs, &mut media_stream, read_bytes, timeout).await?;
+            let elapsed = started.elapsed();
+            let seek_io_stats = cifs.io_stats();
 
-            if block.is_empty() {
-                println!("reached EOF after {} blocks", block_index);
-                break;
-            }
+            let seek_summary =
+                format_seek_report_summary(&seek_measurements, elapsed, seek_io_stats);
 
-            measurements.record_block(
-                block_index,
-                block.len(),
-                block_elapsed,
-                SmokeBlockStats::from_worker(&before),
-                SmokeBlockStats::from_worker(&after),
-                print_blocks,
-            );
+            print!("{seek_summary}");
 
-            if worker_prefill_high && media_stream.should_prefill() {
-                let before_prefill = media_stream.stats();
-                let prefill_started = Instant::now();
+            save_report_summary_if_requested(report_path.as_deref(), &seek_summary)?;
+        } else {
+            let started = Instant::now();
+            let mut measurements = SmokeMeasurements::new(read_blocks);
+            let mut prefill_measurements = SmokePrefillMeasurements::default();
 
-                media_stream
-                    .maybe_prefill_timeout(&mut cifs, timeout)
-                    .await?;
+            for block_index in 0..read_blocks {
+                let before = media_stream.stats();
+                let block_started = Instant::now();
+                let block = media_stream
+                    .read_block_timeout(&mut cifs, read_bytes, timeout)
+                    .await?
+                    .unwrap_or_default();
+                let block_elapsed = block_started.elapsed();
+                let after = media_stream.stats();
 
-                let prefill_elapsed = prefill_started.elapsed();
-                let after_prefill = media_stream.stats();
-                let source_delta = after_prefill
-                    .source_position
-                    .saturating_sub(before_prefill.source_position)
-                    as usize;
+                if block.is_empty() {
+                    println!("reached EOF after {} blocks", block_index);
+                    break;
+                }
 
-                prefill_measurements.record(source_delta, prefill_elapsed);
+                measurements.record_block(
+                    block_index,
+                    block.len(),
+                    block_elapsed,
+                    SmokeBlockStats::from_worker(&before),
+                    SmokeBlockStats::from_worker(&after),
+                    print_blocks,
+                );
 
-                if print_blocks && source_delta > 0 {
-                    println!(
-                        concat!(
-                            "prefill after block {} source {}->{} source_delta={} ",
-                            "in {:?} ({:.2} MiB/s) buffered={} chunks={}"
-                        ),
-                        block_index + 1,
-                        before_prefill.source_position,
-                        after_prefill.source_position,
-                        source_delta,
-                        prefill_elapsed,
-                        mib_per_second(source_delta, prefill_elapsed),
-                        after_prefill.buffered,
-                        after_prefill.buffered_chunks
-                    );
+                if worker_prefill_high && media_stream.should_prefill() {
+                    let before_prefill = media_stream.stats();
+                    let prefill_started = Instant::now();
+
+                    media_stream
+                        .maybe_prefill_timeout(&mut cifs, timeout)
+                        .await?;
+
+                    let prefill_elapsed = prefill_started.elapsed();
+                    let after_prefill = media_stream.stats();
+                    let source_delta = after_prefill
+                        .source_position
+                        .saturating_sub(before_prefill.source_position)
+                        as usize;
+
+                    prefill_measurements.record(source_delta, prefill_elapsed);
+
+                    if print_blocks && source_delta > 0 {
+                        println!(
+                            concat!(
+                                "prefill after block {} source {}->{} source_delta={} ",
+                                "in {:?} ({:.2} MiB/s) buffered={} chunks={}"
+                            ),
+                            block_index + 1,
+                            before_prefill.source_position,
+                            after_prefill.source_position,
+                            source_delta,
+                            prefill_elapsed,
+                            mib_per_second(source_delta, prefill_elapsed),
+                            after_prefill.buffered,
+                            after_prefill.buffered_chunks
+                        );
+                    }
                 }
             }
-        }
 
-        let elapsed = started.elapsed();
-        let stream_io_stats = cifs.io_stats();
+            let elapsed = started.elapsed();
+            let stream_io_stats = cifs.io_stats();
 
-        measurements.print_summary(&path, elapsed);
-        prefill_measurements.print_summary();
-        print_io_stats("stream source reads", stream_io_stats);
+            measurements.print_summary(&path, elapsed);
+            prefill_measurements.print_summary();
+            print_io_stats("stream source reads", stream_io_stats);
 
-        if worker_initial_buffer > 0 {
-            let total_with_initial = elapsed + initial_prefill_elapsed;
-            println!(
-                "total including initial buffer: delivered={} bytes in {:?} ({:.2} MiB/s delivered), initial_buffer={} bytes ({:.2} MiB/s source)",
-                measurements.total,
-                total_with_initial,
-                mib_per_second(measurements.total, total_with_initial),
+            if worker_initial_buffer > 0 {
+                let total_with_initial = elapsed + initial_prefill_elapsed;
+                println!(
+                    "total including initial buffer: delivered={} bytes in {:?} ({:.2} MiB/s delivered), initial_buffer={} bytes ({:.2} MiB/s source)",
+                    measurements.total,
+                    total_with_initial,
+                    mib_per_second(measurements.total, total_with_initial),
+                    initial_prefill_bytes,
+                    mib_per_second(initial_prefill_bytes, initial_prefill_elapsed)
+                );
+            }
+
+            let report_summary = format_report_summary(SmokeReportSummary {
+                path: &path,
+                read_bytes,
+                read_blocks,
+                stream_options: &stream_options,
+                media_stream_options: &media_stream_options,
+                measurements: &measurements,
+                read_elapsed: elapsed,
                 initial_prefill_bytes,
-                mib_per_second(initial_prefill_bytes, initial_prefill_elapsed)
-            );
+                initial_prefill_elapsed,
+                stream_io_stats,
+            });
+
+            print!("{report_summary}");
+
+            save_report_summary_if_requested(report_path.as_deref(), &report_summary)?;
         }
-
-        let report_summary = format_report_summary(SmokeReportSummary {
-            path: &path,
-            read_bytes,
-            read_blocks,
-            stream_options: &stream_options,
-            media_stream_options: &media_stream_options,
-            measurements: &measurements,
-            read_elapsed: elapsed,
-            initial_prefill_bytes,
-            initial_prefill_elapsed,
-            stream_io_stats,
-        });
-
-        print!("{report_summary}");
-
-        save_report_summary_if_requested(report_path.as_deref(), &report_summary)?;
 
         cifs.close_media_stream(media_stream).await?;
     }
@@ -542,6 +562,23 @@ struct SmokeReportSummary<'a> {
     stream_io_stats: CifsIoStats,
 }
 
+struct SmokeSeekMeasurements {
+    file_size: u64,
+    read_bytes: usize,
+    steps: Vec<SmokeSeekStep>,
+}
+
+struct SmokeSeekStep {
+    label: &'static str,
+    requested_offset: u64,
+    actual_offset: u64,
+    read_len: usize,
+    elapsed: Duration,
+    playback_position_after: u64,
+    source_position_after: u64,
+    buffered_after: usize,
+}
+
 async fn scan_media_folder_summaries(
     cifs: &mut Cifs,
     share: &Share,
@@ -608,6 +645,60 @@ fn print_io_stats(label: &str, stats: CifsIoStats) {
         stats.read_at_elapsed,
         stats.read_throughput_mib_per_second()
     );
+}
+
+fn format_seek_report_summary(
+    measurements: &SmokeSeekMeasurements,
+    elapsed: Duration,
+    io_stats: CifsIoStats,
+) -> String {
+    let mut out = String::new();
+
+    out.push('\n');
+    out.push_str("--- SMOKE SEEK TEST SUMMARY ---\n");
+    out.push_str(&format!("file_size: {}\n", measurements.file_size));
+    out.push_str(&format!("seek_read_bytes: {}\n", measurements.read_bytes));
+    out.push_str(&format!("seek_steps: {}\n", measurements.steps.len()));
+    out.push_str(&format!("total_elapsed: {:?}\n", elapsed));
+
+    for step in &measurements.steps {
+        out.push_str(&format!(
+            "step: {} requested_offset={} actual_offset={} read_len={} elapsed={:?} playback_after={} source_after={} buffered_after={} read_mib_s={:.2}\n",
+            step.label,
+            step.requested_offset,
+            step.actual_offset,
+            step.read_len,
+            step.elapsed,
+            step.playback_position_after,
+            step.source_position_after,
+            step.buffered_after,
+            mib_per_second(step.read_len, step.elapsed)
+        ));
+    }
+
+    out.push_str(&format!(
+        "internal_read_calls: {}\n",
+        io_stats.read_at_calls
+    ));
+    out.push_str(&format!(
+        "internal_read_avg_size: {}\n",
+        io_stats.average_read_size()
+    ));
+    out.push_str(&format!(
+        "internal_read_avg_latency: {:?}\n",
+        io_stats.average_read_latency()
+    ));
+    out.push_str(&format!(
+        "internal_summed_source_time: {:?}\n",
+        io_stats.read_at_elapsed
+    ));
+    out.push_str(&format!(
+        "internal_summed_source_rate_mib_s: {:.2}\n",
+        io_stats.read_throughput_mib_per_second()
+    ));
+    out.push_str("--- END SMOKE SEEK TEST SUMMARY ---\n");
+
+    out
 }
 
 fn format_report_summary(summary: SmokeReportSummary<'_>) -> String {
@@ -690,6 +781,92 @@ fn save_report_summary_if_requested(
     println!("saved smoke report summary to {report_path}");
 
     Ok(())
+}
+
+async fn run_seek_smoke_test(
+    cifs: &mut Cifs,
+    media_stream: &mut SmbMediaStream,
+    read_bytes: usize,
+    timeout: Duration,
+) -> Result<SmokeSeekMeasurements, Error> {
+    if read_bytes == 0 {
+        return Err(Error::InvalidConfig(
+            "SMB seek test read size must be greater than zero".to_owned(),
+        ));
+    }
+
+    let file_size = media_stream.stats().file_size;
+    if file_size == 0 {
+        return Err(Error::InvalidConfig(
+            "SMB seek test requires a non-empty file".to_owned(),
+        ));
+    }
+
+    let read_bytes = read_bytes.min(file_size.min(usize::MAX as u64) as usize);
+    let quarter = file_size / 4;
+    let half = file_size / 2;
+    let near_end = file_size.saturating_sub(read_bytes as u64);
+    let back = file_size / 10;
+
+    let seek_points = [
+        ("start", 0),
+        ("quarter", quarter),
+        ("half", half),
+        ("near_end", near_end),
+        ("back_to_10_percent", back),
+    ];
+
+    let mut steps = Vec::with_capacity(seek_points.len());
+
+    println!("seek test: file_size={file_size} read_bytes={read_bytes}");
+
+    for (label, requested_offset) in seek_points {
+        let actual_offset = media_stream.seek(SeekFrom::Start(requested_offset))?;
+
+        let started = Instant::now();
+        let block = media_stream
+            .read_block_timeout(cifs, read_bytes, timeout)
+            .await?
+            .unwrap_or_default();
+        let elapsed = started.elapsed();
+
+        if block.is_empty() {
+            return Err(Error::InternalError(format!(
+                "seek test read returned empty block at {label} offset {actual_offset}"
+            )));
+        }
+
+        let stats = media_stream.stats();
+
+        println!(
+            "seek {label}: requested={} actual={} read={} in {:?} ({:.2} MiB/s) playback={} source={} buffered={}",
+            requested_offset,
+            actual_offset,
+            block.len(),
+            elapsed,
+            mib_per_second(block.len(), elapsed),
+            stats.playback_position,
+            stats.source_position,
+            stats.buffered
+        );
+
+        steps.push(SmokeSeekStep {
+            label,
+            requested_offset,
+            actual_offset,
+            read_len: block.len(),
+            elapsed,
+            playback_position_after: stats.playback_position,
+            source_position_after: stats.source_position,
+            buffered_after: stats.buffered,
+        });
+    }
+
+    Ok(SmokeSeekMeasurements {
+        file_size,
+        read_bytes,
+        steps,
+    })
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {

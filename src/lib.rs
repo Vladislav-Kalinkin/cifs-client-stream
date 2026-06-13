@@ -1,4 +1,6 @@
 mod error;
+#[cfg(feature = "ffi")]
+mod ffi;
 mod netbios;
 mod ntlm;
 mod smb;

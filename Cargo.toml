@@ -27,3 +27,6 @@ lazy_static = "1"
 regex = "1"
 itertools = "0.14"
 tracing = "0.1"
+
+[lib]
+crate-type = ["staticlib", "rlib"]

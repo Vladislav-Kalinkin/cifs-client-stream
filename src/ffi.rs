@@ -3,12 +3,24 @@ use std::fmt::Write as _;
 use std::panic;
 use std::time::Duration;
 
-use crate::{Auth, Cifs, Error, MediaEntry};
+use crate::{Auth, Cifs, Error, MediaEntry, Share};
 
 const BRIDGE_VERSION: &str = "cifs-client-stream tvOS bridge ok";
 const DEFAULT_PROBE_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_LIST_ENTRIES: usize = 30;
 const MAX_LIST_ENTRIES: usize = 100;
+
+pub struct CifsClientStreamSession {
+    runtime: tokio::runtime::Runtime,
+    inner: Option<CifsClientStreamSessionInner>,
+}
+
+struct CifsClientStreamSessionInner {
+    cifs: Cifs,
+    share: Share,
+    host: String,
+    share_name: String,
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn cifs_client_stream_bridge_version() -> *mut c_char {
@@ -53,6 +65,106 @@ pub unsafe extern "C" fn cifs_client_stream_smb_list(
         Ok(Err(message)) => string_into_raw(&format!("SMB list failed: {message}")),
         Err(_) => string_into_raw("SMB list failed: Rust panic was caught"),
     }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cifs_client_stream_smb_list_json(
+    host: *const c_char,
+    share: *const c_char,
+    user: *const c_char,
+    password: *const c_char,
+    path: *const c_char,
+    max_entries: u64,
+    timeout_ms: u64,
+) -> *mut c_char {
+    let result = panic::catch_unwind(|| unsafe {
+        smb_list_json_from_c(host, share, user, password, path, max_entries, timeout_ms)
+    });
+
+    match result {
+        Ok(Ok(message)) => string_into_raw(&message),
+        Ok(Err(message)) => string_into_raw(&json_error("smb_list_json", &message)),
+        Err(_) => string_into_raw(&json_error("smb_list_json", "Rust panic was caught")),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cifs_client_stream_session_open(
+    host: *const c_char,
+    share: *const c_char,
+    user: *const c_char,
+    password: *const c_char,
+    timeout_ms: u64,
+    out_message: *mut *mut c_char,
+) -> *mut CifsClientStreamSession {
+    let result = panic::catch_unwind(|| unsafe {
+        session_open_from_c(host, share, user, password, timeout_ms)
+    });
+
+    match result {
+        Ok(Ok((session, message))) => {
+            unsafe {
+                set_out_message(out_message, &message);
+            }
+            session
+        }
+        Ok(Err(message)) => {
+            unsafe {
+                set_out_message(out_message, &format!("SMB session open failed: {message}"));
+            }
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            unsafe {
+                set_out_message(
+                    out_message,
+                    "SMB session open failed: Rust panic was caught",
+                );
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cifs_client_stream_session_list_json(
+    session: *mut CifsClientStreamSession,
+    path: *const c_char,
+    max_entries: u64,
+    timeout_ms: u64,
+) -> *mut c_char {
+    let result = panic::catch_unwind(|| unsafe {
+        session_list_json_from_c(session, path, max_entries, timeout_ms)
+    });
+
+    match result {
+        Ok(Ok(message)) => string_into_raw(&message),
+        Ok(Err(message)) => string_into_raw(&json_error("session_list_json", &message)),
+        Err(_) => string_into_raw(&json_error("session_list_json", "Rust panic was caught")),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cifs_client_stream_session_close(session: *mut CifsClientStreamSession) {
+    if session.is_null() {
+        return;
+    }
+
+    let _ = panic::catch_unwind(|| unsafe {
+        let mut session = Box::from_raw(session);
+
+        let Some(inner) = session.inner.take() else {
+            return;
+        };
+
+        let CifsClientStreamSessionInner {
+            mut cifs, share, ..
+        } = inner;
+
+        let _ = session
+            .runtime
+            .block_on(async move { cifs.umount(share).await });
+    });
 }
 
 /// Frees a string returned by cifs-client-stream FFI functions.
@@ -106,13 +218,7 @@ unsafe fn smb_list_from_c(
     let password = unsafe { optional_c_string(password) }?;
     let path = unsafe { optional_c_string(path) }?;
 
-    let max_entries = usize::try_from(max_entries).unwrap_or(usize::MAX);
-    let max_entries = if max_entries == 0 {
-        DEFAULT_LIST_ENTRIES
-    } else {
-        max_entries.min(MAX_LIST_ENTRIES)
-    };
-
+    let max_entries = normalize_max_entries(max_entries);
     let timeout = timeout_from_ms(timeout_ms);
     let runtime = build_runtime()?;
 
@@ -127,6 +233,95 @@ unsafe fn smb_list_from_c(
     ))
 }
 
+unsafe fn smb_list_json_from_c(
+    host: *const c_char,
+    share: *const c_char,
+    user: *const c_char,
+    password: *const c_char,
+    path: *const c_char,
+    max_entries: u64,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let host = unsafe { required_c_string(host, "host") }?;
+    let share = unsafe { required_c_string(share, "share") }?;
+    let user = unsafe { optional_c_string(user) }?;
+    let password = unsafe { optional_c_string(password) }?;
+    let path = unsafe { optional_c_string(path) }?;
+
+    let max_entries = normalize_max_entries(max_entries);
+    let timeout = timeout_from_ms(timeout_ms);
+    let runtime = build_runtime()?;
+
+    runtime.block_on(run_smb_list_json(
+        host,
+        share,
+        user,
+        password,
+        path,
+        max_entries,
+        timeout,
+    ))
+}
+
+unsafe fn session_open_from_c(
+    host: *const c_char,
+    share: *const c_char,
+    user: *const c_char,
+    password: *const c_char,
+    timeout_ms: u64,
+) -> Result<(*mut CifsClientStreamSession, String), String> {
+    let host = unsafe { required_c_string(host, "host") }?;
+    let share = unsafe { required_c_string(share, "share") }?;
+    let user = unsafe { optional_c_string(user) }?;
+    let password = unsafe { optional_c_string(password) }?;
+
+    let timeout = timeout_from_ms(timeout_ms);
+    let runtime = build_runtime()?;
+
+    let inner = runtime.block_on(open_session(
+        host.clone(),
+        share.clone(),
+        user,
+        password,
+        timeout,
+    ))?;
+
+    let session = Box::new(CifsClientStreamSession {
+        runtime,
+        inner: Some(inner),
+    });
+
+    let message = format!("SMB session opened: host={host} share={share}");
+
+    Ok((Box::into_raw(session), message))
+}
+
+unsafe fn session_list_json_from_c(
+    session: *mut CifsClientStreamSession,
+    path: *const c_char,
+    max_entries: u64,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let session = unsafe {
+        session
+            .as_mut()
+            .ok_or_else(|| "session pointer is null".to_owned())?
+    };
+
+    let path = unsafe { optional_c_string(path) }?;
+    let max_entries = normalize_max_entries(max_entries);
+    let timeout = timeout_from_ms(timeout_ms);
+
+    let inner = session
+        .inner
+        .as_mut()
+        .ok_or_else(|| "session is already closed".to_owned())?;
+
+    session
+        .runtime
+        .block_on(run_session_list_json(inner, path, max_entries, timeout))
+}
+
 fn timeout_from_ms(timeout_ms: u64) -> Duration {
     let timeout_ms = if timeout_ms == 0 {
         DEFAULT_PROBE_TIMEOUT_MS
@@ -137,11 +332,49 @@ fn timeout_from_ms(timeout_ms: u64) -> Duration {
     Duration::from_millis(timeout_ms)
 }
 
+fn normalize_max_entries(max_entries: u64) -> usize {
+    let max_entries = usize::try_from(max_entries).unwrap_or(usize::MAX);
+
+    if max_entries == 0 {
+        DEFAULT_LIST_ENTRIES
+    } else {
+        max_entries.min(MAX_LIST_ENTRIES)
+    }
+}
+
 fn build_runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("failed to create Tokio runtime: {error}"))
+}
+
+async fn open_session(
+    host: String,
+    share_name: String,
+    user: String,
+    password: String,
+    timeout: Duration,
+) -> Result<CifsClientStreamSessionInner, String> {
+    let auth = auth_for_host(&host, &user, &password);
+
+    let mut cifs = Cifs::open_timeout(&host, None, auth, timeout)
+        .await
+        .map_err(format_error)?;
+
+    let mount_path = format!("\\\\{host}\\{share_name}");
+
+    let share = tokio::time::timeout(timeout, cifs.mount(&mount_path))
+        .await
+        .map_err(|_| "timeout while mounting SMB share".to_owned())?
+        .map_err(format_error)?;
+
+    Ok(CifsClientStreamSessionInner {
+        cifs,
+        share,
+        host,
+        share_name,
+    })
 }
 
 async fn run_smb_probe(
@@ -233,9 +466,75 @@ async fn run_smb_list(
     Ok(message)
 }
 
+async fn run_smb_list_json(
+    host: String,
+    share_name: String,
+    user: String,
+    password: String,
+    path: String,
+    max_entries: usize,
+    timeout: Duration,
+) -> Result<String, String> {
+    let auth = auth_for_host(&host, &user, &password);
+
+    let mut cifs = Cifs::open_timeout(&host, None, auth, timeout)
+        .await
+        .map_err(format_error)?;
+
+    let mount_path = format!("\\\\{host}\\{share_name}");
+
+    let mounted_share = tokio::time::timeout(timeout, cifs.mount(&mount_path))
+        .await
+        .map_err(|_| "timeout while mounting SMB share".to_owned())?
+        .map_err(format_error)?;
+
+    let started = std::time::Instant::now();
+
+    let entries = list_media_entries(&mut cifs, &mounted_share, &path, timeout).await?;
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    let umount_warning = match tokio::time::timeout(timeout, cifs.umount(mounted_share)).await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format_error(error)),
+        Err(_) => Some("timeout".to_owned()),
+    };
+
+    Ok(format_list_json(
+        &host,
+        &share_name,
+        &path,
+        &entries,
+        max_entries,
+        umount_warning.as_deref(),
+        Some(elapsed_ms),
+    ))
+}
+
+async fn run_session_list_json(
+    inner: &mut CifsClientStreamSessionInner,
+    path: String,
+    max_entries: usize,
+    timeout: Duration,
+) -> Result<String, String> {
+    let started = std::time::Instant::now();
+    let entries = list_media_entries(&mut inner.cifs, &inner.share, &path, timeout).await?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    Ok(format_list_json(
+        &inner.host,
+        &inner.share_name,
+        &path,
+        &entries,
+        max_entries,
+        None,
+        Some(elapsed_ms),
+    ))
+}
+
 async fn list_media_entries(
     cifs: &mut Cifs,
-    share: &crate::Share,
+    share: &Share,
     path: &str,
     timeout: Duration,
 ) -> Result<Vec<MediaEntry>, String> {
@@ -278,15 +577,7 @@ fn normalize_display_path(path: &str) -> &str {
 }
 
 fn format_entry_line(entry: &MediaEntry) -> String {
-    let kind = if entry.is_folder() {
-        "folder"
-    } else if entry.is_audio() {
-        "audio"
-    } else if entry.is_video() {
-        "video"
-    } else {
-        "media"
-    };
+    let kind = entry_kind(entry);
 
     if entry.is_folder() {
         format!("[{kind}] {}", entry.name)
@@ -310,6 +601,112 @@ fn append_umount_warning(
     }
 }
 
+fn format_list_json(
+    host: &str,
+    share: &str,
+    path: &str,
+    entries: &[MediaEntry],
+    max_entries: usize,
+    umount_warning: Option<&str>,
+    elapsed_ms: Option<u64>,
+) -> String {
+    let normalized_path = normalize_display_path(path);
+    let returned = entries.len().min(max_entries);
+
+    let mut out = String::new();
+
+    out.push_str("{\"status\":\"ok\"");
+    out.push_str(",\"host\":");
+    push_json_string(&mut out, host);
+    out.push_str(",\"share\":");
+    push_json_string(&mut out, share);
+    out.push_str(",\"path\":");
+    push_json_string(&mut out, normalized_path);
+    out.push_str(",\"entries_total\":");
+    out.push_str(&entries.len().to_string());
+    out.push_str(",\"entries_returned\":");
+    out.push_str(&returned.to_string());
+    if let Some(elapsed_ms) = elapsed_ms {
+        out.push_str(",\"elapsed_ms\":");
+        out.push_str(&elapsed_ms.to_string());
+    }
+
+    if let Some(warning) = umount_warning {
+        out.push_str(",\"umount_warning\":");
+        push_json_string(&mut out, warning);
+    }
+
+    out.push_str(",\"entries\":[");
+
+    for (index, entry) in entries.iter().take(max_entries).enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+
+        out.push('{');
+
+        out.push_str("\"name\":");
+        push_json_string(&mut out, &entry.name);
+
+        out.push_str(",\"kind\":");
+        push_json_string(&mut out, entry_kind(entry));
+
+        out.push_str(",\"size\":");
+        out.push_str(&entry.size.to_string());
+
+        out.push('}');
+    }
+
+    out.push_str("]}");
+
+    out
+}
+
+fn entry_kind(entry: &MediaEntry) -> &'static str {
+    if entry.is_folder() {
+        "folder"
+    } else if entry.is_audio() {
+        "audio"
+    } else if entry.is_video() {
+        "video"
+    } else {
+        "media"
+    }
+}
+
+fn json_error(operation: &str, message: &str) -> String {
+    let mut out = String::new();
+
+    out.push_str("{\"status\":\"error\"");
+    out.push_str(",\"operation\":");
+    push_json_string(&mut out, operation);
+    out.push_str(",\"message\":");
+    push_json_string(&mut out, message);
+    out.push('}');
+
+    out
+}
+
+fn push_json_string(out: &mut String, value: &str) {
+    out.push('"');
+
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch <= '\u{1f}' => {
+                write!(out, "\\u{:04x}", ch as u32).expect("writing to String should not fail");
+            }
+            ch => out.push(ch),
+        }
+    }
+
+    out.push('"');
+}
+
 unsafe fn required_c_string(ptr: *const c_char, name: &str) -> Result<String, String> {
     let value = unsafe { optional_c_string(ptr) }?;
 
@@ -329,6 +726,16 @@ unsafe fn optional_c_string(ptr: *const c_char) -> Result<String, String> {
         .to_str()
         .map(str::to_owned)
         .map_err(|error| format!("invalid UTF-8 string from Swift/C: {error}"))
+}
+
+unsafe fn set_out_message(out_message: *mut *mut c_char, message: &str) {
+    if out_message.is_null() {
+        return;
+    }
+
+    unsafe {
+        *out_message = string_into_raw(message);
+    }
 }
 
 fn format_error(error: Error) -> String {
@@ -386,5 +793,14 @@ mod tests {
     fn list_pattern_handles_nested_path() {
         assert_eq!(list_pattern("/Movies"), "/Movies/*");
         assert_eq!(list_pattern("/Movies/"), "/Movies/*");
+    }
+
+    #[test]
+    fn json_string_escapes_special_characters() {
+        let mut out = String::new();
+
+        push_json_string(&mut out, "A\"B\\C\nКириллица");
+
+        assert_eq!(out, "\"A\\\"B\\\\C\\nКириллица\"");
     }
 }

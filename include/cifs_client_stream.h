@@ -13,6 +13,11 @@ char *cifs_client_stream_smb_probe(const char *host, const char *share,
                                    const char *user, const char *password,
                                    uint64_t timeout_ms);
 
+char *cifs_client_stream_smb_list(const char *host, const char *share,
+                                  const char *user, const char *password,
+                                  const char *path, uint64_t max_entries,
+                                  uint64_t timeout_ms);
+
 void cifs_client_stream_free_string(char *ptr);
 
 #ifdef __cplusplus

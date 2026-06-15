@@ -8,6 +8,22 @@ extern "C" {
 #endif
 
 typedef struct CifsClientStreamSession CifsClientStreamSession;
+typedef struct CifsClientStreamMedia CifsClientStreamMedia;
+
+CifsClientStreamMedia *
+cifs_client_stream_session_open_media(CifsClientStreamSession *session,
+                                      const char *path, uint64_t timeout_ms,
+                                      char **out_message);
+
+int64_t cifs_client_stream_media_read_at(CifsClientStreamMedia *media,
+                                         uint64_t offset, uint8_t *buffer,
+                                         uint64_t buffer_len,
+                                         uint64_t timeout_ms,
+                                         char **out_message);
+
+uint64_t cifs_client_stream_media_size(CifsClientStreamMedia *media);
+
+void cifs_client_stream_media_close(CifsClientStreamMedia *media);
 
 char *cifs_client_stream_bridge_version(void);
 

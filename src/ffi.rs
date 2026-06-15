@@ -1,9 +1,11 @@
 use std::ffi::{CStr, CString, c_char};
 use std::fmt::Write as _;
+use std::io::SeekFrom;
 use std::panic;
+use std::ptr;
 use std::time::Duration;
 
-use crate::{Auth, Cifs, Error, MediaEntry, Share};
+use crate::{Auth, Cifs, Error, MediaEntry, Share, SmbMediaStream};
 
 const BRIDGE_VERSION: &str = "cifs-client-stream tvOS bridge ok";
 const DEFAULT_PROBE_TIMEOUT_MS: u64 = 15_000;
@@ -20,6 +22,12 @@ struct CifsClientStreamSessionInner {
     share: Share,
     host: String,
     share_name: String,
+}
+
+pub struct CifsClientStreamMedia {
+    session: *mut CifsClientStreamSession,
+    stream: Option<SmbMediaStream>,
+    file_size: u64,
 }
 
 #[unsafe(no_mangle)]
@@ -142,6 +150,104 @@ pub unsafe extern "C" fn cifs_client_stream_session_list_json(
         Ok(Err(message)) => string_into_raw(&json_error("session_list_json", &message)),
         Err(_) => string_into_raw(&json_error("session_list_json", "Rust panic was caught")),
     }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cifs_client_stream_session_open_media(
+    session: *mut CifsClientStreamSession,
+    path: *const c_char,
+    timeout_ms: u64,
+    out_message: *mut *mut c_char,
+) -> *mut CifsClientStreamMedia {
+    let result =
+        panic::catch_unwind(|| unsafe { session_open_media_from_c(session, path, timeout_ms) });
+
+    match result {
+        Ok(Ok((media, message))) => {
+            unsafe {
+                set_out_message(out_message, &message);
+            }
+            media
+        }
+        Ok(Err(message)) => {
+            unsafe {
+                set_out_message(out_message, &format!("SMB media open failed: {message}"));
+            }
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            unsafe {
+                set_out_message(out_message, "SMB media open failed: Rust panic was caught");
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cifs_client_stream_media_read_at(
+    media: *mut CifsClientStreamMedia,
+    offset: u64,
+    buffer: *mut u8,
+    buffer_len: u64,
+    timeout_ms: u64,
+    out_message: *mut *mut c_char,
+) -> i64 {
+    let result = panic::catch_unwind(|| unsafe {
+        media_read_at_from_c(media, offset, buffer, buffer_len, timeout_ms)
+    });
+
+    match result {
+        Ok(Ok(bytes_read)) => bytes_read,
+        Ok(Err(message)) => {
+            unsafe {
+                set_out_message(out_message, &message);
+            }
+            -1
+        }
+        Err(_) => {
+            unsafe {
+                set_out_message(out_message, "SMB media read failed: Rust panic was caught");
+            }
+            -1
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cifs_client_stream_media_size(media: *mut CifsClientStreamMedia) -> u64 {
+    if media.is_null() {
+        return 0;
+    }
+
+    unsafe { (*media).file_size }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cifs_client_stream_media_close(media: *mut CifsClientStreamMedia) {
+    if media.is_null() {
+        return;
+    }
+
+    let _ = panic::catch_unwind(|| unsafe {
+        let mut media = Box::from_raw(media);
+
+        let Some(stream) = media.stream.take() else {
+            return;
+        };
+
+        let Some(session) = media.session.as_mut() else {
+            return;
+        };
+
+        let Some(inner) = session.inner.as_mut() else {
+            return;
+        };
+
+        let _ = session
+            .runtime
+            .block_on(async { inner.cifs.close_media_stream(stream).await });
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -320,6 +426,142 @@ unsafe fn session_list_json_from_c(
     session
         .runtime
         .block_on(run_session_list_json(inner, path, max_entries, timeout))
+}
+
+unsafe fn session_open_media_from_c(
+    session: *mut CifsClientStreamSession,
+    path: *const c_char,
+    timeout_ms: u64,
+) -> Result<(*mut CifsClientStreamMedia, String), String> {
+    let session = unsafe {
+        session
+            .as_mut()
+            .ok_or_else(|| "session pointer is null".to_owned())?
+    };
+
+    let path = unsafe { required_c_string(path, "path") }?;
+    let timeout = timeout_from_ms(timeout_ms);
+
+    let inner = session
+        .inner
+        .as_mut()
+        .ok_or_else(|| "session is already closed".to_owned())?;
+
+    let stream =
+        session
+            .runtime
+            .block_on(open_media_stream_for_session(inner, path.clone(), timeout))?;
+
+    let file_size = stream.stats().file_size;
+
+    let media = Box::new(CifsClientStreamMedia {
+        session,
+        stream: Some(stream),
+        file_size,
+    });
+
+    let message = format!("SMB media opened: path={path} size={file_size}");
+
+    Ok((Box::into_raw(media), message))
+}
+
+unsafe fn media_read_at_from_c(
+    media: *mut CifsClientStreamMedia,
+    offset: u64,
+    buffer: *mut u8,
+    buffer_len: u64,
+    timeout_ms: u64,
+) -> Result<i64, String> {
+    let media = unsafe {
+        media
+            .as_mut()
+            .ok_or_else(|| "media pointer is null".to_owned())?
+    };
+
+    if buffer.is_null() {
+        return Err("output buffer pointer is null".to_owned());
+    }
+
+    let requested_len = usize::try_from(buffer_len).unwrap_or(usize::MAX);
+
+    if requested_len == 0 {
+        return Ok(0);
+    }
+
+    let Some(stream) = media.stream.as_mut() else {
+        return Err("media stream is already closed".to_owned());
+    };
+
+    let session = unsafe { media.session.as_mut() }
+        .ok_or_else(|| "media parent session pointer is null".to_owned())?;
+
+    let inner = session
+        .inner
+        .as_mut()
+        .ok_or_else(|| "session is already closed".to_owned())?;
+
+    let timeout = timeout_from_ms(timeout_ms);
+
+    let bytes = session.runtime.block_on(read_media_at_for_session(
+        inner,
+        stream,
+        offset,
+        requested_len,
+        timeout,
+    ))?;
+
+    let bytes_to_copy = bytes.len().min(requested_len);
+
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes_to_copy);
+    }
+
+    let bytes_read = i64::try_from(bytes_to_copy)
+        .map_err(|error| format!("media read size conversion failed: {error}"))?;
+
+    Ok(bytes_read)
+}
+
+async fn open_media_stream_for_session(
+    inner: &mut CifsClientStreamSessionInner,
+    path: String,
+    timeout: Duration,
+) -> Result<SmbMediaStream, String> {
+    tokio::time::timeout(timeout, inner.cifs.open_media_stream(&inner.share, &path))
+        .await
+        .map_err(|_| "timeout while opening SMB media stream".to_owned())?
+        .map_err(format_error)
+}
+
+async fn read_media_at_for_session(
+    inner: &mut CifsClientStreamSessionInner,
+    stream: &mut SmbMediaStream,
+    offset: u64,
+    requested_len: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    let file_size = stream.stats().file_size;
+
+    if offset >= file_size {
+        return Ok(Vec::new());
+    }
+
+    let remaining = file_size.saturating_sub(offset);
+    let requested_len = requested_len.min(remaining.min(usize::MAX as u64) as usize);
+
+    if requested_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    stream.seek(SeekFrom::Start(offset)).map_err(format_error)?;
+
+    let block = stream
+        .read_block_timeout(&mut inner.cifs, requested_len, timeout)
+        .await
+        .map_err(format_error)?
+        .unwrap_or_default();
+
+    Ok(block.to_vec())
 }
 
 fn timeout_from_ms(timeout_ms: u64) -> Duration {

@@ -1,11 +1,11 @@
 use std::ffi::{CStr, CString, c_char};
 use std::fmt::Write as _;
-use std::io::SeekFrom;
 use std::panic;
 use std::ptr;
 use std::time::Duration;
 
-use crate::{Auth, Cifs, Error, MediaEntry, Share, SmbMediaStream};
+use crate::smb::SMB_LEGACY_READ_MAX;
+use crate::{Auth, Cifs, Error, Handle, MediaEntry, Share};
 
 const BRIDGE_VERSION: &str = "cifs-client-stream tvOS bridge ok";
 const DEFAULT_PROBE_TIMEOUT_MS: u64 = 15_000;
@@ -26,7 +26,7 @@ struct CifsClientStreamSessionInner {
 
 pub struct CifsClientStreamMedia {
     session: *mut CifsClientStreamSession,
-    stream: Option<SmbMediaStream>,
+    handle: Option<Handle>,
     file_size: u64,
 }
 
@@ -232,7 +232,7 @@ pub unsafe extern "C" fn cifs_client_stream_media_close(media: *mut CifsClientSt
     let _ = panic::catch_unwind(|| unsafe {
         let mut media = Box::from_raw(media);
 
-        let Some(stream) = media.stream.take() else {
+        let Some(handle) = media.handle.take() else {
             return;
         };
 
@@ -246,7 +246,7 @@ pub unsafe extern "C" fn cifs_client_stream_media_close(media: *mut CifsClientSt
 
         let _ = session
             .runtime
-            .block_on(async { inner.cifs.close_media_stream(stream).await });
+            .block_on(async { inner.cifs.close(handle).await });
     });
 }
 
@@ -447,16 +447,16 @@ unsafe fn session_open_media_from_c(
         .as_mut()
         .ok_or_else(|| "session is already closed".to_owned())?;
 
-    let stream =
+    let handle =
         session
             .runtime
-            .block_on(open_media_stream_for_session(inner, path.clone(), timeout))?;
+            .block_on(open_media_handle_for_session(inner, path.clone(), timeout))?;
 
-    let file_size = stream.stats().file_size;
+    let file_size = handle.size;
 
     let media = Box::new(CifsClientStreamMedia {
         session,
-        stream: Some(stream),
+        handle: Some(handle),
         file_size,
     });
 
@@ -488,8 +488,8 @@ unsafe fn media_read_at_from_c(
         return Ok(0);
     }
 
-    let Some(stream) = media.stream.as_mut() else {
-        return Err("media stream is already closed".to_owned());
+    let Some(handle) = media.handle.as_ref() else {
+        return Err("media handle is already closed".to_owned());
     };
 
     let session = unsafe { media.session.as_mut() }
@@ -502,9 +502,9 @@ unsafe fn media_read_at_from_c(
 
     let timeout = timeout_from_ms(timeout_ms);
 
-    let bytes = session.runtime.block_on(read_media_at_for_session(
+    let bytes = session.runtime.block_on(read_media_handle_at_for_session(
         inner,
-        stream,
+        handle,
         offset,
         requested_len,
         timeout,
@@ -522,46 +522,70 @@ unsafe fn media_read_at_from_c(
     Ok(bytes_read)
 }
 
-async fn open_media_stream_for_session(
+async fn open_media_handle_for_session(
     inner: &mut CifsClientStreamSessionInner,
     path: String,
     timeout: Duration,
-) -> Result<SmbMediaStream, String> {
-    tokio::time::timeout(timeout, inner.cifs.open_media_stream(&inner.share, &path))
+) -> Result<Handle, String> {
+    tokio::time::timeout(timeout, inner.cifs.openfile(&inner.share, &path))
         .await
-        .map_err(|_| "timeout while opening SMB media stream".to_owned())?
+        .map_err(|_| "timeout while opening SMB media handle".to_owned())?
         .map_err(format_error)
 }
 
-async fn read_media_at_for_session(
+async fn read_media_handle_at_for_session(
     inner: &mut CifsClientStreamSessionInner,
-    stream: &mut SmbMediaStream,
+    handle: &Handle,
     offset: u64,
     requested_len: usize,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
-    let file_size = stream.stats().file_size;
-
-    if offset >= file_size {
-        return Ok(Vec::new());
-    }
-
-    let remaining = file_size.saturating_sub(offset);
-    let requested_len = requested_len.min(remaining.min(usize::MAX as u64) as usize);
-
     if requested_len == 0 {
         return Ok(Vec::new());
     }
 
-    stream.seek(SeekFrom::Start(offset)).map_err(format_error)?;
+    if offset >= handle.size {
+        return Ok(Vec::new());
+    }
 
-    let block = stream
-        .read_block_timeout(&mut inner.cifs, requested_len, timeout)
-        .await
-        .map_err(format_error)?
-        .unwrap_or_default();
+    let remaining_file_bytes = handle.size.saturating_sub(offset);
+    let mut remaining =
+        requested_len.min(usize::try_from(remaining_file_bytes).unwrap_or(usize::MAX));
 
-    Ok(block.to_vec())
+    if remaining == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut cursor = offset;
+    let mut output = Vec::with_capacity(remaining);
+
+    while remaining > 0 {
+        let read_len = remaining.min(SMB_LEGACY_READ_MAX as usize);
+        let read_len_u32 = u32::try_from(read_len)
+            .map_err(|error| format!("media read length conversion failed: {error}"))?;
+
+        let chunk = tokio::time::timeout(timeout, inner.cifs.read_at(handle, cursor, read_len_u32))
+            .await
+            .map_err(|_| "timeout while reading SMB media handle".to_owned())?
+            .map_err(format_error)?;
+
+        if chunk.is_empty() {
+            break;
+        }
+
+        let chunk_len = chunk.len();
+
+        output.extend_from_slice(&chunk);
+
+        cursor = cursor.saturating_add(
+            u64::try_from(chunk_len)
+                .map_err(|error| format!("media read offset conversion failed: {error}"))?,
+        );
+
+        remaining = remaining.saturating_sub(chunk_len);
+    }
+
+    Ok(output)
 }
 
 fn timeout_from_ms(timeout_ms: u64) -> Duration {
